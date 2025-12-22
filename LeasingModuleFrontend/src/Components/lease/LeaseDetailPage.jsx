@@ -2747,9 +2747,9 @@ const selectCustomArea = (val) => {
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div>
             <div className="text-xl font-semibold text-gray-900">Lease Allocation</div>
-            <div className="text-xs text-gray-500 mt-1">
+            {/* <div className="text-xs text-gray-500 mt-1">
               Select floors, enter required area, auto-pick units. Edit split areas only if needed.
-            </div>
+            </div> */}
           </div>
 
           <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
@@ -2960,9 +2960,7 @@ const selectCustomArea = (val) => {
             </div>
           </div>
 
-          {/* RIGHT: Allocation Builder + Selected Units */}
           <div className="lg:col-span-2 space-y-4">
-            {/* Allocation Builder */}
             <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
               <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
                 <div>

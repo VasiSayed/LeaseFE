@@ -1,5 +1,6 @@
 // src/Components/Floor/FloorSetupPage.jsx
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
 import { Plus, RefreshCw, Search, Filter, Pencil, Eye, ArrowLeft } from "lucide-react";
 import toast from "react-hot-toast";
 import { setupAPI } from "../../services/api";
@@ -12,6 +13,7 @@ const n2 = (v) => {
 };
 
 const fmtInt = (v) => Math.round(n2(v)).toLocaleString("en-IN");
+const hasVal = (v) => String(v ?? "").trim() !== "";
 
 const chipClass = (isActive) =>
   isActive
@@ -82,15 +84,35 @@ const FloorSetupPage = () => {
 
   /* ---------- list filters ---------- */
   const [q, setQ] = useState("");
-  const [onlyActive, setOnlyActive] = useState(false);
+  // const [onlyActive, setOnlyActive] = useState(false);
   const [statusFilter, setStatusFilter] = useState("ALL");
 
   /* ---------- form ---------- */
   const [form, setForm] = useState(DEFAULT_FORM);
   const [saving, setSaving] = useState(false);
+const initAutoCalcRef = useRef(false);
+const [leasableEdited, setLeasableEdited] = useState(false);
 
   const readOnly = formMode === "VIEW";
-  const onChange = (key, value) => setForm((p) => ({ ...p, [key]: value }));
+  // const onChange = (key, value) => setForm((p) => ({ ...p, [key]: value }));
+  const onChange = (key, value) => {
+    setForm((p) => {
+      const next = { ...p, [key]: value };
+
+      // ✅ label auto from number
+      if (key === "number") {
+        const n = String(value ?? "").trim();
+        next.label = n ? `Floor ${n}` : "";
+      }
+
+      return next;
+    });
+
+    // ✅ if user manually edits leasable, stop auto override (until cleared)
+    if (key === "leasable_area_sqft") {
+      setLeasableEdited(hasVal(value)); // if cleared -> auto can work again
+    }
+  };
 
   /* ---------- load sites ---------- */
   useEffect(() => {
@@ -187,8 +209,12 @@ const FloorSetupPage = () => {
     const query = q.trim().toLowerCase();
     return (floors || [])
       .filter((f) => {
-        if (onlyActive && !f.is_active) return false;
-        if (statusFilter !== "ALL" && String(f.status).toUpperCase() !== statusFilter) return false;
+        // if (onlyActive && !f.is_active) return false;
+        if (
+          statusFilter !== "ALL" &&
+          String(f.status).toUpperCase() !== statusFilter
+        )
+          return false;
 
         if (!query) return true;
         const label = String(f.label || "").toLowerCase();
@@ -196,13 +222,17 @@ const FloorSetupPage = () => {
         return label.includes(query) || num.includes(query);
       })
       .sort((a, b) => n2(a.number) - n2(b.number));
-  }, [floors, q, onlyActive, statusFilter]);
+  }, [floors, q, statusFilter]);
+
 
   const totals = useMemo(() => {
     const list = filteredFloors || [];
     const totalFloors = list.length;
     const totalArea = list.reduce((acc, f) => acc + n2(f.total_area_sqft), 0);
-    const totalLeasable = list.reduce((acc, f) => acc + n2(f.leasable_area_sqft), 0);
+    const totalLeasable = list.reduce(
+      (acc, f) => acc + n2(f.leasable_area_sqft),
+      0
+    );
     const totalCam = list.reduce((acc, f) => acc + n2(f.cam_area_sqft), 0);
     const remaining = Math.max(0, totalArea - totalLeasable - totalCam);
     return { totalFloors, totalArea, totalLeasable, totalCam, remaining };
@@ -253,6 +283,8 @@ const FloorSetupPage = () => {
       status: "AVAILABLE",
       is_active: true,
     });
+    initAutoCalcRef.current = false;
+    setLeasableEdited(false);
     setViewMode("FORM");
   };
 
@@ -271,6 +303,8 @@ const FloorSetupPage = () => {
       cam_area_sqft: floor.cam_area_sqft ?? "",
       is_active: floor.is_active ?? true,
     });
+    initAutoCalcRef.current = false;
+    setLeasableEdited(false);
     setViewMode("FORM");
   };
 
@@ -289,8 +323,38 @@ const FloorSetupPage = () => {
       cam_area_sqft: floor.cam_area_sqft ?? "",
       is_active: floor.is_active ?? true,
     });
+    initAutoCalcRef.current = false;
+    setLeasableEdited(false);
     setViewMode("FORM");
   };
+
+  useEffect(() => {
+    if (viewMode !== "FORM") return;
+    if (readOnly) return;
+
+    // skip the first render after opening form (so edit/view doesn't overwrite immediately)
+    if (!initAutoCalcRef.current) {
+      initAutoCalcRef.current = true;
+      return;
+    }
+
+    // only auto-calc if user hasn't manually edited leasable
+    if (leasableEdited) return;
+
+    if (!hasVal(form.total_area_sqft) || !hasVal(form.cam_area_sqft)) return;
+
+    const total = n2(form.total_area_sqft);
+    const cam = n2(form.cam_area_sqft);
+    const nextLeasable = Math.max(0, total - cam);
+
+    setForm((p) => ({ ...p, leasable_area_sqft: String(nextLeasable) }));
+  }, [
+    form.total_area_sqft,
+    form.cam_area_sqft,
+    viewMode,
+    readOnly,
+    leasableEdited,
+  ]);
 
   // keep list dropdowns in sync when form changes site/tower_id
   useEffect(() => {
@@ -309,26 +373,33 @@ const FloorSetupPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.tower_id, viewMode]);
 
-  const buildPayload = (override = {}) => ({
-    site: Number(form.site),
-    tower_id: Number(form.tower_id), // ✅ REQUIRED by backend
-    number: Number(form.number),
-    label: String(form.label),
-    status: String(form.status || "AVAILABLE"),
-    total_area_sqft: String(form.total_area_sqft),
-    leasable_area_sqft: String(form.leasable_area_sqft || "0.00"),
-    cam_area_sqft: String(form.cam_area_sqft || "0.00"),
-    is_active: !!form.is_active,
-    ...override,
-  });
+  const buildPayload = (override = {}) => {
+    const numStr = String(form.number ?? "").trim();
+    const label = numStr ? `Floor ${numStr}` : "";
+
+    return {
+      site: Number(form.site),
+      tower_id: Number(form.tower_id),
+      number: Number(form.number),
+      label, // ✅ auto label
+      status: String(form.status || "AVAILABLE"),
+      total_area_sqft: String(form.total_area_sqft),
+      leasable_area_sqft: String(form.leasable_area_sqft || "0.00"),
+      cam_area_sqft: String(form.cam_area_sqft || "0.00"),
+      is_active: true, // ✅ always true by default
+      ...override,
+    };
+  };
 
   const saveFloor = async ({ asDraft = false } = {}) => {
     if (readOnly) return;
 
-    if (!form.site || !form.tower_id) return toast.error("Site and Tower are required");
-    if (String(form.number).trim() === "") return toast.error("Floor number is required");
-    if (!String(form.label).trim()) return toast.error("Floor name/label is required");
-    if (String(form.total_area_sqft).trim() === "") return toast.error("Total area is required");
+    if (!form.site || !form.tower_id)
+      return toast.error("Site and Tower are required");
+    if (String(form.number).trim() === "")
+      return toast.error("Floor number is required");
+    if (String(form.total_area_sqft).trim() === "")
+      return toast.error("Total area is required");
 
     const payload = asDraft
       ? buildPayload({ status: "INACTIVE", is_active: false })
@@ -357,10 +428,15 @@ const FloorSetupPage = () => {
   /* ---------- FORM PAGE UI ---------- */
   if (viewMode === "FORM") {
     const title =
-      formMode === "CREATE" ? "Add Floor" : formMode === "EDIT" ? "Edit Floor" : "Floor Details";
+      formMode === "CREATE"
+        ? "Add Floor"
+        : formMode === "EDIT"
+        ? "Edit Floor"
+        : "Floor Details";
 
     const crumbFloor =
-      form.label || (String(form.number).trim() ? `Floor ${form.number}` : "New Floor");
+      form.label ||
+      (String(form.number).trim() ? `Floor ${form.number}` : "New Floor");
 
     return (
       <div className="px-6 py-6">
@@ -372,7 +448,9 @@ const FloorSetupPage = () => {
               <span className="mx-1">›</span> Floor Setup{" "}
               <span className="mx-1">›</span> {crumbFloor}
             </div>
-            <h2 className="text-2xl font-semibold text-gray-800 mt-1">{title}</h2>
+            <h2 className="text-2xl font-semibold text-gray-800 mt-1">
+              {title}
+            </h2>
           </div>
 
           <button
@@ -392,7 +470,9 @@ const FloorSetupPage = () => {
 
             <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Site</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Site
+                </label>
                 <select
                   value={form.site}
                   onChange={(e) => onChange("site", Number(e.target.value))}
@@ -408,7 +488,9 @@ const FloorSetupPage = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Tower</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Tower
+                </label>
                 <select
                   value={form.tower_id}
                   onChange={(e) => onChange("tower_id", Number(e.target.value))}
@@ -423,7 +505,7 @@ const FloorSetupPage = () => {
                 </select>
               </div>
 
-              <div>
+              {/* <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">
                   Floor Name / Number
                 </label>
@@ -434,10 +516,12 @@ const FloorSetupPage = () => {
                   placeholder="Floor 101 / Tower 1 - Floor 1"
                   disabled={saving || readOnly}
                 />
-              </div>
+              </div> */}
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Floor Number</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Floor Number
+                </label>
                 <input
                   type="number"
                   value={form.number}
@@ -449,7 +533,9 @@ const FloorSetupPage = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Status</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Status
+                </label>
                 <select
                   value={form.status}
                   onChange={(e) => onChange("status", e.target.value)}
@@ -463,7 +549,7 @@ const FloorSetupPage = () => {
                 </select>
               </div>
 
-              <div className="flex items-center justify-between md:justify-start md:gap-4">
+              {/* <div className="flex items-center justify-between md:justify-start md:gap-4">
                 <div>
                   <div className="text-xs font-medium text-gray-600 mb-1">Status (Active)</div>
                   <div className="flex items-center gap-2">
@@ -477,13 +563,15 @@ const FloorSetupPage = () => {
                     </span>
                   </div>
                 </div>
-              </div>
+              </div> */}
             </div>
           </div>
 
           {/* Area Details */}
           <div className="bg-white border border-gray-200 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-800">Area Details</h3>
+            <h3 className="text-sm font-semibold text-gray-800">
+              Area Details
+            </h3>
 
             <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
@@ -501,19 +589,6 @@ const FloorSetupPage = () => {
 
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Usable / Net Area (optional)
-                </label>
-                <input
-                  value={form.leasable_area_sqft}
-                  onChange={(e) => onChange("leasable_area_sqft", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="45000"
-                  disabled={saving || readOnly}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
                   Common / Service Area (optional)
                 </label>
                 <input
@@ -525,21 +600,43 @@ const FloorSetupPage = () => {
                 />
               </div>
 
-              <div className="md:col-span-2">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Usable / Net Area (optional)
+                </label>
+                <input
+                  value={form.leasable_area_sqft}
+                  onChange={(e) =>
+                    onChange("leasable_area_sqft", e.target.value)
+                  }
+                  className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="45000"
+                  disabled={saving || readOnly}
+                />
+              </div>
+
+              {/* <div className="md:col-span-2">
                 <div className="mt-1 p-3 rounded-lg bg-gray-50 border border-gray-200 text-sm text-gray-700 flex flex-wrap gap-x-6 gap-y-2">
                   <span>
                     <span className="text-gray-500">Allocated Area:</span>{" "}
-                    <span className="font-semibold">{fmtInt(computedAllocated)}</span> sq.ft
+                    <span className="font-semibold">
+                      {fmtInt(computedAllocated)}
+                    </span>{" "}
+                    sq.ft
                   </span>
                   <span>
                     <span className="text-gray-500">Remaining Area:</span>{" "}
-                    <span className="font-semibold">{fmtInt(computedRemaining)}</span> sq.ft
+                    <span className="font-semibold">
+                      {fmtInt(computedRemaining)}
+                    </span>{" "}
+                    sq.ft
                   </span>
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
-                  Remaining Area = Total Floor Area - (Usable/Net Area + Common/Service Area)
+                  Remaining Area = Total Floor Area - (Usable/Net Area +
+                  Common/Service Area)
                 </div>
-              </div>
+              </div> */}
             </div>
           </div>
 
@@ -588,9 +685,6 @@ const FloorSetupPage = () => {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-2xl font-semibold text-gray-800">Floor Setup</h2>
-          <p className="text-sm text-gray-500 mt-1">
-            Manage floors by Site → Tower. Add/update floor areas and status.
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -598,7 +692,9 @@ const FloorSetupPage = () => {
             onClick={refreshFloors}
             className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white text-sm text-gray-700 hover:bg-gray-50"
           >
-            <RefreshCw className={`w-4 h-4 ${loadingFloors ? "animate-spin" : ""}`} />
+            <RefreshCw
+              className={`w-4 h-4 ${loadingFloors ? "animate-spin" : ""}`}
+            />
             Refresh
           </button>
 
@@ -617,7 +713,9 @@ const FloorSetupPage = () => {
         <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
           {/* Site */}
           <div className="md:col-span-3">
-            <label className="block text-xs font-medium text-gray-600 mb-1">Site</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Site
+            </label>
             <select
               value={selectedSiteId}
               onChange={(e) => setSelectedSiteId(e.target.value)}
@@ -638,7 +736,9 @@ const FloorSetupPage = () => {
 
           {/* Tower */}
           <div className="md:col-span-3">
-            <label className="block text-xs font-medium text-gray-600 mb-1">Tower</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Tower
+            </label>
             <select
               value={selectedTowerId}
               onChange={(e) => setSelectedTowerId(e.target.value)}
@@ -659,7 +759,9 @@ const FloorSetupPage = () => {
 
           {/* Search */}
           <div className="md:col-span-4">
-            <label className="block text-xs font-medium text-gray-600 mb-1">Search floor</label>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Search floor
+            </label>
             <div className="relative">
               <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
@@ -671,46 +773,73 @@ const FloorSetupPage = () => {
             </div>
           </div>
 
-          {/* Filters */}
+          {/* Status Filter only */}
           <div className="md:col-span-2">
-            <label className="block text-xs font-medium text-gray-600 mb-1">Filters</label>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setOnlyActive((p) => !p)}
-                className={`h-10 px-3 rounded-lg border text-sm inline-flex items-center gap-2 ${
-                  onlyActive
-                    ? "border-blue-200 bg-blue-50 text-blue-700"
-                    : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
-                }`}
-              >
-                <Filter className="w-4 h-4" />
-                Active
-              </button>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Status
+            </label>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="ALL">All</option>
+              <option value="AVAILABLE">Available</option>
+              <option value="RESERVED">Reserved</option>
+              <option value="OCCUPIED">Occupied</option>
+              <option value="INACTIVE">Inactive</option>
+            </select>
+          </div>
+        </div>
+      </div>
 
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="ALL">All</option>
-                <option value="AVAILABLE">Available</option>
-                <option value="RESERVED">Reserved</option>
-                <option value="OCCUPIED">Occupied</option>
-                <option value="INACTIVE">Inactive</option>
-              </select>
+      {/* ✅ Totals just below filters */}
+      <div className="mt-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
+          <div className="p-3 rounded-lg bg-white border border-gray-200">
+            <div className="text-xs text-gray-500">Total Floors</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {totals.totalFloors}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-white border border-gray-200">
+            <div className="text-xs text-gray-500">
+              Total Floor Area (sq.ft)
+            </div>
+            <div className="text-lg font-semibold text-gray-800">
+              {fmtInt(totals.totalArea)}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-white border border-gray-200">
+            <div className="text-xs text-gray-500">Total Leasable (sq.ft)</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {fmtInt(totals.totalLeasable)}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-white border border-gray-200">
+            <div className="text-xs text-gray-500">Total CAM (sq.ft)</div>
+            <div className="text-lg font-semibold text-gray-800">
+              {fmtInt(totals.totalCam)}
+            </div>
+          </div>
+
+          <div className="p-3 rounded-lg bg-white border border-gray-200">
+            <div className="text-xs text-gray-500">
+              Approx Remaining (sq.ft)
+            </div>
+            <div className="text-lg font-semibold text-gray-800">
+              {fmtInt(totals.remaining)}
             </div>
           </div>
         </div>
 
-        {/* Context chips */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-gray-500">Selected:</span>
-          <span className="text-xs px-2 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700">
-            Site: {selectedSite?.name || "-"}
-          </span>
-          <span className="text-xs px-2 py-1 rounded-full border border-gray-200 bg-gray-50 text-gray-700">
-            Tower: {selectedTower?.name || "-"}
-          </span>
+        <div className="mt-2 text-xs text-gray-500">
+          Tip: Click <span className="font-medium">View</span> or{" "}
+          <span className="font-medium">Edit</span> to open the floor details
+          page.
         </div>
       </div>
 
@@ -720,7 +849,9 @@ const FloorSetupPage = () => {
           <div>
             <h3 className="text-sm font-semibold text-gray-800">Floors</h3>
             <p className="text-xs text-gray-500 mt-0.5">
-              {loadingFloors ? "Loading..." : `${filteredFloors.length} records`}
+              {loadingFloors
+                ? "Loading..."
+                : `${filteredFloors.length} records`}
             </p>
           </div>
         </div>
@@ -742,13 +873,19 @@ const FloorSetupPage = () => {
             <tbody className="divide-y divide-gray-100">
               {loadingFloors ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                  <td
+                    colSpan={7}
+                    className="px-4 py-8 text-center text-gray-500"
+                  >
                     Loading floors...
                   </td>
                 </tr>
               ) : filteredFloors.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                  <td
+                    colSpan={7}
+                    className="px-4 py-8 text-center text-gray-500"
+                  >
                     No floors found. Try changing filters or add a new floor.
                   </td>
                 </tr>
@@ -756,26 +893,35 @@ const FloorSetupPage = () => {
                 filteredFloors.map((f) => (
                   <tr key={f.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-800">
-                        {f.label || `Floor ${f.number}`}
-                      </div>
-                      <div className="text-xs text-gray-500">
-                        No: {f.number} • ID: {f.id}
-                      </div>
+                      <div className="font-medium text-gray-800">{`Floor ${f.number}`}</div>
                     </td>
 
-                    <td className="px-4 py-3 font-medium text-gray-800">{fmtInt(f.total_area_sqft)}</td>
-                    <td className="px-4 py-3 text-gray-800">{fmtInt(f.leasable_area_sqft)}</td>
-                    <td className="px-4 py-3 text-gray-800">{fmtInt(f.cam_area_sqft)}</td>
+                    <td className="px-4 py-3 font-medium text-gray-800">
+                      {fmtInt(f.total_area_sqft)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-800">
+                      {fmtInt(f.leasable_area_sqft)}
+                    </td>
+                    <td className="px-4 py-3 text-gray-800">
+                      {fmtInt(f.cam_area_sqft)}
+                    </td>
 
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${statusChip(f.status)}`}>
+                      <span
+                        className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${statusChip(
+                          f.status
+                        )}`}
+                      >
                         {String(f.status || "—")}
                       </span>
                     </td>
 
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${chipClass(!!f.is_active)}`}>
+                      <span
+                        className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${chipClass(
+                          !!f.is_active
+                        )}`}
+                      >
                         {!!f.is_active ? "Active" : "Inactive"}
                       </span>
                     </td>
@@ -803,35 +949,6 @@ const FloorSetupPage = () => {
               )}
             </tbody>
           </table>
-        </div>
-
-        {/* Totals Footer */}
-        <div className="border-t border-gray-200 bg-white">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-5 px-4 py-4">
-            <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-              <div className="text-xs text-gray-500">Total Floors</div>
-              <div className="text-lg font-semibold text-gray-800">{totals.totalFloors}</div>
-            </div>
-            <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-              <div className="text-xs text-gray-500">Total Floor Area (sq.ft)</div>
-              <div className="text-lg font-semibold text-gray-800">{fmtInt(totals.totalArea)}</div>
-            </div>
-            <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-              <div className="text-xs text-gray-500">Total Leasable (sq.ft)</div>
-              <div className="text-lg font-semibold text-gray-800">{fmtInt(totals.totalLeasable)}</div>
-            </div>
-            <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-              <div className="text-xs text-gray-500">Total CAM (sq.ft)</div>
-              <div className="text-lg font-semibold text-gray-800">{fmtInt(totals.totalCam)}</div>
-            </div>
-            <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
-              <div className="text-xs text-gray-500">Approx Remaining (sq.ft)</div>
-              <div className="text-lg font-semibold text-gray-800">{fmtInt(totals.remaining)}</div>
-            </div>
-          </div>
-          <div className="px-4 pb-4 text-xs text-gray-500">
-            Tip: Click <span className="font-medium">View</span> or <span className="font-medium">Edit</span> to open the floor details page.
-          </div>
         </div>
       </div>
     </div>

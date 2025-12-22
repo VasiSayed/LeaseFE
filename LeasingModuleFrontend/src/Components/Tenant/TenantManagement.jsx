@@ -1262,7 +1262,7 @@ await tenantAPI.updateContact(
               <div className="mb-8">
                 <h2 className="text-lg font-semibold mb-4">Tenant Identity</h2>
                 <div className="grid grid-cols-3 gap-6">
-                  <div>
+                  {/* <div>
                     <label className="block text-sm text-gray-700 mb-2">
                       Tenant ID
                     </label>
@@ -1274,7 +1274,7 @@ await tenantAPI.updateContact(
                       placeholder="TI00012345"
                       className="w-full px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                  </div>
+                  </div> */}
                   <div>
                     <label className="block text-sm text-gray-700 mb-2">
                       Legal Name
