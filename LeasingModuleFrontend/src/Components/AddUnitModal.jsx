@@ -18,20 +18,32 @@ import toast from "react-hot-toast";
 import UnitFormFields from "./UnitFormFields";
 
 export default function CommercialUnitDetailPage({ onClose, unitId }) {
+  // const [formData, setFormData] = useState({
+  //   // System fields - at root level, NOT in custom_data
+  //   unit_no: "",
+  //   unit_type: "COMMERCIAL",
+  //   floor: "",
+  //   status: "AVAILABLE",
+
+  //   // Optional model fields
+  //   leasable_area_sqft: "",
+  //   builtup_area_sqft: "",
+
+  //   // Dynamic custom fields
+  //   custom_data: {},
+  // });
   const [formData, setFormData] = useState({
-    // System fields - at root level, NOT in custom_data
-    unit_no: "",
-    unit_type: "COMMERCIAL",
-    floor: "",
-    status: "AVAILABLE",
+  unit_no: "",
+  unit_type: "COMMERCIAL",
+  floor_id: "",            // ✅
+  status: "AVAILABLE",
 
-    // Optional model fields
-    leasable_area_sqft: "",
-    builtup_area_sqft: "",
+  leasable_area_sqft: "",
+  builtup_area_sqft: "",
 
-    // Dynamic custom fields
-    custom_data: {},
-  });
+  custom_data: {},
+});
+
 
   const [sites, setSites] = useState([]);
   const [selectedSite, setSelectedSite] = useState(null);
@@ -42,6 +54,7 @@ export default function CommercialUnitDetailPage({ onClose, unitId }) {
   const [loading, setLoading] = useState(true);
   const [loadingFields, setLoadingFields] = useState(false);
   const [loadingSiteTree, setLoadingSiteTree] = useState(false);
+  
 
   const [expandedSections, setExpandedSections] = useState({
     IDENTITY: true,
@@ -260,11 +273,19 @@ export default function CommercialUnitDetailPage({ onClose, unitId }) {
   };
 
   const handleSystemFieldChange = (fieldKey, value) => {
+  if (fieldKey === "floor") {
     setFormData((prev) => ({
       ...prev,
-      [fieldKey]: value,
+      floor_id: value,     // ✅ store here
     }));
-  };
+    return;
+  }
+
+  setFormData((prev) => ({
+    ...prev,
+    [fieldKey]: value,
+  }));
+};
 
   const handleCustomFieldChange = (fieldKey, value) => {
     setFormData((prev) => ({
@@ -285,7 +306,7 @@ export default function CommercialUnitDetailPage({ onClose, unitId }) {
     // Reset floor when site changes
     setFormData((prev) => ({
       ...prev,
-      floor: "",
+      floor_id: "",
     }));
     setSiteDropdownOpen(false);
   };

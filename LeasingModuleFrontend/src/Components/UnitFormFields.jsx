@@ -23,6 +23,8 @@ export default function UnitFormFields({
   const [openDropdowns, setOpenDropdowns] = useState({});
   const [expandedTowers, setExpandedTowers] = useState({});
   const dropdownRefs = useRef({});
+  const [selectedTowerByField, setSelectedTowerByField] = useState({});
+
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -121,127 +123,264 @@ export default function UnitFormFields({
   );
 
   // Get selected floor display with tower name
-  const getSelectedFloorDisplay = (floorId) => {
-    if (!floorId) return "Select tower and floor...";
+  const getSelectedFloorDisplay = (floorId, options = []) => {
+  if (!floorId) return "Select tower and floor...";
 
-    for (const tower of siteTree) {
-      const floor = tower.floors?.find((f) => f.id === parseInt(floorId));
-      if (floor) {
-        return `${tower.name} → Floor ${floor.number}${
-          floor.label ? ` (${floor.label})` : ""
-        }`;
-      }
+  // 1) try siteTree
+  for (const tower of siteTree) {
+    const floor = tower.floors?.find((f) => f.id === parseInt(floorId));
+    if (floor) {
+      return `${tower.name} → Floor ${floor.number}${floor.label ? ` (${floor.label})` : ""}`;
     }
-    return "Select tower and floor...";
-  };
+  }
+
+  // 2) fallback to resolved config options [{value,label}]
+  const opt = (options || []).find(
+    (o) => o?.value?.toString() === floorId?.toString()
+  );
+  if (opt) return opt.label || String(opt.value);
+
+  return "Select tower and floor...";
+};
+
+const getTowerGroupsForFloorField = (field) => {
+  // If backend gives grouped towers (your current API)
+  if (
+    Array.isArray(field?.options) &&
+    field.options.length > 0 &&
+    typeof field.options[0] === "object" &&
+    "tower_id" in field.options[0] &&
+    Array.isArray(field.options[0].options)
+  ) {
+    return field.options;
+  }
+
+  // Fallback: build from siteTree if needed
+  if (Array.isArray(siteTree) && siteTree.length > 0) {
+    return siteTree.map((t) => ({
+      tower_id: t.id,
+      tower_name: t.name,
+      options: (t.floors || []).map((f) => ({
+        value: f.id,
+        label: `Floor ${f.number}${f.label ? ` (${f.label})` : ""}`,
+        floor_number: f.number,
+        floor_label: f.label || "",
+      })),
+    }));
+  }
+
+  return [];
+};
+
+// Auto-set tower when editing (floor_id already selected)
+useEffect(() => {
+  const floorField = (systemFields || []).find((f) => f.key === "floor");
+  if (!floorField) return;
+
+  const groups = getTowerGroupsForFloorField(floorField);
+  const selectedFloorId = formData?.floor_id;
+  if (!selectedFloorId) return;
+
+  const foundTower = groups.find((g) =>
+    (g.options || []).some(
+      (opt) => opt?.value?.toString() === selectedFloorId?.toString()
+    )
+  );
+
+  if (foundTower) {
+    setSelectedTowerByField((prev) => ({
+      ...prev,
+      floor: foundTower.tower_id,
+    }));
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [systemFields, formData?.floor_id, siteTree]);
+
 
   const renderField = (field) => {
     const isSystemField = field.is_system_field;
+    // const value = isSystemField
+    //   ? formData[field.key] || ""
+    //   : formData.custom_data?.[field.key] || "";
     const value = isSystemField
-      ? formData[field.key] || ""
-      : formData.custom_data?.[field.key] || "";
+  ? (field.key === "floor" ? (formData.floor_id ?? "") : (formData[field.key] ?? ""))
+  : (formData.custom_data?.[field.key] ?? "");
+
 
     const onChange = isSystemField ? onSystemFieldChange : onCustomFieldChange;
+    const floorOptions = Array.isArray(field.options)
+  ? field.options.filter((o) => o && typeof o === "object" && "value" in o)
+  : [];
 
-    // Special handling for floor field - hierarchical tower → floor selection
-    if ((field.key === "floor_id" || field.key === "floor") && isSystemField) {
-      return (
-        <div className="mb-4" key={field.id}>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
-            <div className="flex items-center gap-2">
-              <Lock className="w-3 h-3 text-blue-600" />
-              <span>{field.label}</span>
-              <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
-                System Field
-              </span>
-              <span className="text-red-500">*</span>
+const hasTreeFloors =
+  Array.isArray(siteTree) &&
+  siteTree.some((t) => Array.isArray(t.floors) && t.floors.length > 0);
+
+// Group options by tower name from label like: "Tower 1 - Floor 1"
+const groupedByTower = floorOptions.reduce((acc, opt) => {
+  const label = String(opt.label || "");
+  const towerName = label.includes(" - ")
+    ? label.split(" - ")[0].trim()
+    : "Floors"; // fallback group
+
+  if (!acc[towerName]) acc[towerName] = [];
+  acc[towerName].push(opt);
+  return acc;
+}, {});
+
+if ((field.key === "floor_id" || field.key === "floor") && isSystemField) {
+  const dropdownKeyTower = `${field.key}__tower`;
+  const dropdownKeyFloor = `${field.key}__floor`;
+
+  const towerGroups = getTowerGroupsForFloorField(field);
+  const selectedTowerId = selectedTowerByField[field.key] || ""; // store tower selection by field.key
+
+  const selectedTowerObj = towerGroups.find(
+    (g) => g.tower_id?.toString() === selectedTowerId?.toString()
+  );
+
+  const floorList = selectedTowerObj?.options || [];
+
+  const selectedFloorObj = floorList.find(
+    (opt) => opt?.value?.toString() === value?.toString()
+  );
+
+  return (
+    <div className="mb-4" key={field.id}>
+      <label className="block text-sm font-medium text-gray-700 mb-2">
+        <div className="flex items-center gap-2">
+          <Lock className="w-3 h-3 text-blue-600" />
+          <span>{field.label}</span>
+          <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded">
+            System Field
+          </span>
+          <span className="text-red-500">*</span>
+        </div>
+      </label>
+
+      {/* ✅ Tower + Floor grid */}
+      <div className="grid grid-cols-2 gap-3">
+        {/* ===== Tower Dropdown ===== */}
+        <div className="relative" ref={(el) => (dropdownRefs.current[dropdownKeyTower] = el)}>
+          <button
+            type="button"
+            data-dropdown={dropdownKeyTower}
+            onClick={() => toggleDropdown(dropdownKeyTower)}
+            className="w-full px-3 py-2 border-2 border-blue-200 bg-blue-50 rounded-md text-sm text-left flex items-center justify-between hover:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <span className="text-gray-800">
+              {selectedTowerObj ? selectedTowerObj.tower_name : "Select tower..."}
+            </span>
+            <ChevronDown
+              className={`w-4 h-4 text-gray-400 transition-transform ${
+                openDropdowns[dropdownKeyTower] ? "rotate-180" : ""
+              }`}
+            />
+          </button>
+
+          {openDropdowns[dropdownKeyTower] && (
+            <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-300 rounded-md shadow-xl max-h-60 overflow-y-auto">
+              {towerGroups.length === 0 ? (
+                <div className="px-4 py-6 text-center text-gray-500 text-sm">
+                  No towers available
+                </div>
+              ) : (
+                towerGroups.map((tg) => (
+                  <button
+                    key={tg.tower_id}
+                    type="button"
+                    onClick={() => {
+                      // set tower
+                      setSelectedTowerByField((prev) => ({
+                        ...prev,
+                        [field.key]: tg.tower_id,
+                      }));
+
+                      // reset floor when tower changes
+                      onChange(field.key, ""); // field.key = "floor" -> will clear floor_id via parent mapping
+                      setOpenDropdowns({});
+                    }}
+                    className={`w-full px-3 py-2 text-sm text-left hover:bg-gray-50 text-gray-800 ${
+                      selectedTowerId?.toString() === tg.tower_id?.toString()
+                        ? "bg-blue-50 text-blue-700 font-medium"
+                        : ""
+                    }`}
+                  >
+                    {tg.tower_name}
+                  </button>
+                ))
+              )}
             </div>
-          </label>
-          <div className="relative" ref={(el) => (dropdownRefs.current[field.key] = el)}>
-            <button
-              type="button"
-              data-dropdown={field.key}
-              onClick={() => toggleDropdown(field.key)}
-              className="w-full px-3 py-2 border-2 border-blue-200 bg-blue-50 rounded-md text-sm text-left flex items-center justify-between hover:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <span className="text-gray-800">
-                {getSelectedFloorDisplay(value)}
-              </span>
-              <ChevronDown
-                className={`w-4 h-4 text-gray-400 transition-transform ${
-                  openDropdowns[field.key] ? "rotate-180" : ""
-                }`}
-              />
-            </button>
-            {openDropdowns[field.key] && (
-              <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-300 rounded-md shadow-xl max-h-80 overflow-y-auto">
-                {siteTree.length === 0 ? (
-                  <div className="px-4 py-8 text-center text-gray-500">
-                    <p className="text-sm">No towers/floors available</p>
-                  </div>
-                ) : (
-                  siteTree.map((tower) => (
-                    <div key={tower.id}>
-                      {/* Tower Header */}
-                      <button
-                        type="button"
-                        onClick={() => toggleTower(tower.id)}
-                        className="w-full px-3 py-2 text-sm text-left hover:bg-gray-50 font-medium text-gray-800 flex items-center justify-between border-b border-gray-100"
-                      >
-                        <span>{tower.name}</span>
-                        <ChevronRight
-                          className={`w-4 h-4 text-gray-400 transition-transform ${
-                            expandedTowers[tower.id] ? "rotate-90" : ""
-                          }`}
-                        />
-                      </button>
-
-                      {/* Floors List */}
-                      {expandedTowers[tower.id] && (
-                        <div className="bg-gray-50">
-                          {tower.floors && tower.floors.length > 0 ? (
-                            tower.floors.map((floor) => (
-                              <button
-                                key={`tower-${tower.id}-floor-${floor.id}`}
-                                type="button"
-                                onClick={() => {
-                                  onChange(field.key, floor.id);
-                                  setOpenDropdowns({});
-                                }}
-                                className={`w-full px-6 py-2 text-sm text-left hover:bg-blue-50 text-gray-700 ${
-                                  parseInt(value) === floor.id || value?.toString() === floor.id?.toString()
-                                    ? "bg-blue-50 text-blue-700 font-medium"
-                                    : ""
-                                }`}
-                              >
-                                Floor {floor.number}
-                                {floor.label && ` (${floor.label})`}
-                                {floor.status && (
-                                  <span className="ml-2 text-xs text-gray-500">
-                                    • {floor.status}
-                                  </span>
-                                )}
-                              </button>
-                            ))
-                          ) : (
-                            <div className="px-6 py-3 text-xs text-gray-500 text-center">
-                              No floors in this tower
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-          {field.help_text && (
-            <p className="mt-1 text-xs text-gray-500">{field.help_text}</p>
           )}
         </div>
-      );
-    }
+
+        {/* ===== Floor Dropdown ===== */}
+        <div className="relative" ref={(el) => (dropdownRefs.current[dropdownKeyFloor] = el)}>
+          <button
+            type="button"
+            data-dropdown={dropdownKeyFloor}
+            onClick={() => {
+              if (!selectedTowerId) return; // must select tower first
+              toggleDropdown(dropdownKeyFloor);
+            }}
+            disabled={!selectedTowerId}
+            className={`w-full px-3 py-2 border rounded-md text-sm text-left flex items-center justify-between focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              !selectedTowerId
+                ? "border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed"
+                : "border-blue-200 bg-blue-50 hover:border-blue-300"
+            }`}
+          >
+            <span className="text-gray-800">
+              {!selectedTowerId
+                ? "Select tower first..."
+                : selectedFloorObj
+                ? selectedFloorObj.label
+                : "Select floor..."}
+            </span>
+            <ChevronDown
+              className={`w-4 h-4 text-gray-400 transition-transform ${
+                openDropdowns[dropdownKeyFloor] ? "rotate-180" : ""
+              }`}
+            />
+          </button>
+
+          {openDropdowns[dropdownKeyFloor] && (
+            <div className="absolute z-[100] w-full mt-1 bg-white border border-gray-300 rounded-md shadow-xl max-h-60 overflow-y-auto">
+              {floorList.length === 0 ? (
+                <div className="px-4 py-6 text-center text-gray-500 text-sm">
+                  No floors in this tower
+                </div>
+              ) : (
+                floorList.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => {
+                      onChange(field.key, opt.value); // field.key="floor"
+                      setOpenDropdowns({});
+                    }}
+                    className={`w-full px-3 py-2 text-sm text-left hover:bg-blue-50 text-gray-800 ${
+                      value?.toString() === opt.value?.toString()
+                        ? "bg-blue-50 text-blue-700 font-medium"
+                        : ""
+                    }`}
+                  >
+                    Floor {opt.floor_number}
+                    
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {field.help_text && (
+        <p className="mt-1 text-xs text-gray-500">{field.help_text}</p>
+      )}
+    </div>
+  );
+}
 
     // Rest of the field rendering logic (TEXT, NUMBER, DATE, SELECT, etc.)
     // ... (keep all the other field type renderers from the previous version)

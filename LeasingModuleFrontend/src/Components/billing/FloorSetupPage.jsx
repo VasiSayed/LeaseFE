@@ -47,7 +47,7 @@ const Toggle = ({ checked, onChange, disabled }) => (
 const DEFAULT_FORM = {
   id: null,
   site: "",
-  tower_id: "",
+  tower_id: "", // ✅ IMPORTANT: backend wants tower_id
   number: "",
   label: "",
   status: "AVAILABLE",
@@ -89,8 +89,7 @@ const FloorSetupPage = () => {
   const [form, setForm] = useState(DEFAULT_FORM);
   const [saving, setSaving] = useState(false);
 
-  const modalReadOnly = formMode === "VIEW";
-
+  const readOnly = formMode === "VIEW";
   const onChange = (key, value) => setForm((p) => ({ ...p, [key]: value }));
 
   /* ---------- load sites ---------- */
@@ -186,7 +185,6 @@ const FloorSetupPage = () => {
 
   const filteredFloors = useMemo(() => {
     const query = q.trim().toLowerCase();
-
     return (floors || [])
       .filter((f) => {
         if (onlyActive && !f.is_active) return false;
@@ -210,10 +208,11 @@ const FloorSetupPage = () => {
     return { totalFloors, totalArea, totalLeasable, totalCam, remaining };
   }, [filteredFloors]);
 
-  const computedAllocated = useMemo(() => n2(form.leasable_area_sqft) + n2(form.cam_area_sqft), [
-    form.leasable_area_sqft,
-    form.cam_area_sqft,
-  ]);
+  const computedAllocated = useMemo(
+    () => n2(form.leasable_area_sqft) + n2(form.cam_area_sqft),
+    [form.leasable_area_sqft, form.cam_area_sqft]
+  );
+
   const computedRemaining = useMemo(
     () => Math.max(0, n2(form.total_area_sqft) - computedAllocated),
     [form.total_area_sqft, computedAllocated]
@@ -250,7 +249,7 @@ const FloorSetupPage = () => {
     setForm({
       ...DEFAULT_FORM,
       site: Number(selectedSiteId),
-      tower_id: Number(selectedTowerId),
+      tower_id: Number(selectedTowerId), // ✅
       status: "AVAILABLE",
       is_active: true,
     });
@@ -262,8 +261,8 @@ const FloorSetupPage = () => {
     setForm({
       ...DEFAULT_FORM,
       id: floor.id,
-      site: floor.site,
-      tower: floor.tower,
+      site: floor.site ?? floor.site_id ?? "",
+      tower_id: floor.tower_id ?? floor.tower ?? "", // ✅ handle both shapes
       number: floor.number ?? "",
       label: floor.label ?? "",
       status: floor.status ?? "AVAILABLE",
@@ -280,8 +279,8 @@ const FloorSetupPage = () => {
     setForm({
       ...DEFAULT_FORM,
       id: floor.id,
-      site: floor.site,
-      tower: floor.tower,
+      site: floor.site ?? floor.site_id ?? "",
+      tower_id: floor.tower_id ?? floor.tower ?? "", // ✅ handle both shapes
       number: floor.number ?? "",
       label: floor.label ?? "",
       status: floor.status ?? "AVAILABLE",
@@ -293,7 +292,7 @@ const FloorSetupPage = () => {
     setViewMode("FORM");
   };
 
-  // keep list dropdowns in sync when form changes site/tower
+  // keep list dropdowns in sync when form changes site/tower_id
   useEffect(() => {
     if (viewMode !== "FORM") return;
     if (form.site && String(form.site) !== String(selectedSiteId)) {
@@ -304,15 +303,15 @@ const FloorSetupPage = () => {
 
   useEffect(() => {
     if (viewMode !== "FORM") return;
-    if (form.tower && String(form.tower) !== String(selectedTowerId)) {
-      setSelectedTowerId(String(form.tower));
+    if (form.tower_id && String(form.tower_id) !== String(selectedTowerId)) {
+      setSelectedTowerId(String(form.tower_id));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.tower, viewMode]);
+  }, [form.tower_id, viewMode]);
 
   const buildPayload = (override = {}) => ({
     site: Number(form.site),
-    tower: Number(form.tower),
+    tower_id: Number(form.tower_id), // ✅ REQUIRED by backend
     number: Number(form.number),
     label: String(form.label),
     status: String(form.status || "AVAILABLE"),
@@ -324,14 +323,13 @@ const FloorSetupPage = () => {
   });
 
   const saveFloor = async ({ asDraft = false } = {}) => {
-    if (modalReadOnly) return;
+    if (readOnly) return;
 
-    if (!form.site || !form.tower) return toast.error("Site and Tower are required");
+    if (!form.site || !form.tower_id) return toast.error("Site and Tower are required");
     if (String(form.number).trim() === "") return toast.error("Floor number is required");
     if (!String(form.label).trim()) return toast.error("Floor name/label is required");
     if (String(form.total_area_sqft).trim() === "") return toast.error("Total area is required");
 
-    // Draft behavior (safe): mark INACTIVE + inactive
     const payload = asDraft
       ? buildPayload({ status: "INACTIVE", is_active: false })
       : buildPayload();
@@ -359,13 +357,10 @@ const FloorSetupPage = () => {
   /* ---------- FORM PAGE UI ---------- */
   if (viewMode === "FORM") {
     const title =
-      formMode === "CREATE"
-        ? "Add Floor"
-        : formMode === "EDIT"
-        ? "Edit Floor"
-        : "Floor Details";
+      formMode === "CREATE" ? "Add Floor" : formMode === "EDIT" ? "Edit Floor" : "Floor Details";
 
-    const crumbFloor = form.label || (String(form.number).trim() ? `Floor ${form.number}` : "New Floor");
+    const crumbFloor =
+      form.label || (String(form.number).trim() ? `Floor ${form.number}` : "New Floor");
 
     return (
       <div className="px-6 py-6">
@@ -402,7 +397,7 @@ const FloorSetupPage = () => {
                   value={form.site}
                   onChange={(e) => onChange("site", Number(e.target.value))}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly || loadingSites}
+                  disabled={saving || readOnly || loadingSites}
                 >
                   {(sites || []).map((s) => (
                     <option key={s.id} value={s.id}>
@@ -415,10 +410,10 @@ const FloorSetupPage = () => {
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1">Tower</label>
                 <select
-                  value={form.tower}
-                  onChange={(e) => onChange("tower", Number(e.target.value))}
+                  value={form.tower_id}
+                  onChange={(e) => onChange("tower_id", Number(e.target.value))}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly || loadingTowers || !form.site}
+                  disabled={saving || readOnly || loadingTowers || !form.site}
                 >
                   {(towers || []).map((t) => (
                     <option key={t.id} value={t.id}>
@@ -429,13 +424,15 @@ const FloorSetupPage = () => {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Floor Name / Number</label>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  Floor Name / Number
+                </label>
                 <input
                   value={form.label}
                   onChange={(e) => onChange("label", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="Floor 101 / Tower 1 - Floor 1"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 />
               </div>
 
@@ -447,7 +444,7 @@ const FloorSetupPage = () => {
                   onChange={(e) => onChange("number", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="101"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 />
               </div>
 
@@ -457,7 +454,7 @@ const FloorSetupPage = () => {
                   value={form.status}
                   onChange={(e) => onChange("status", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 >
                   <option value="AVAILABLE">AVAILABLE</option>
                   <option value="RESERVED">RESERVED</option>
@@ -473,7 +470,7 @@ const FloorSetupPage = () => {
                     <Toggle
                       checked={!!form.is_active}
                       onChange={(v) => onChange("is_active", v)}
-                      disabled={saving || modalReadOnly}
+                      disabled={saving || readOnly}
                     />
                     <span className="text-sm text-gray-700">
                       {form.is_active ? "Active" : "Inactive"}
@@ -498,7 +495,7 @@ const FloorSetupPage = () => {
                   onChange={(e) => onChange("total_area_sqft", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="50000"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 />
               </div>
 
@@ -511,7 +508,7 @@ const FloorSetupPage = () => {
                   onChange={(e) => onChange("leasable_area_sqft", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="45000"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 />
               </div>
 
@@ -524,7 +521,7 @@ const FloorSetupPage = () => {
                   onChange={(e) => onChange("cam_area_sqft", e.target.value)}
                   className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="5000"
-                  disabled={saving || modalReadOnly}
+                  disabled={saving || readOnly}
                 />
               </div>
 
@@ -541,73 +538,6 @@ const FloorSetupPage = () => {
                 </div>
                 <div className="mt-2 text-xs text-gray-500">
                   Remaining Area = Total Floor Area - (Usable/Net Area + Common/Service Area)
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Commercial Settings (UI-only for now) */}
-          <div className="bg-white border border-gray-200 rounded-xl p-5">
-            <h3 className="text-sm font-semibold text-gray-800">Commercial Settings</h3>
-
-            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Floor Type</label>
-                <select
-                  value={form.floor_type_ui}
-                  onChange={(e) => onChange("floor_type_ui", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly}
-                >
-                  <option value="Commercial">Commercial</option>
-                  <option value="Retail">Retail</option>
-                  <option value="Office">Office</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Allowed Use</label>
-                <select
-                  value={form.allowed_use_ui}
-                  onChange={(e) => onChange("allowed_use_ui", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly}
-                >
-                  <option value="Office">Office</option>
-                  <option value="Retail">Retail</option>
-                  <option value="Food Court">Food Court</option>
-                  <option value="Mixed">Mixed</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Leasing Type</label>
-                <select
-                  value={form.leasing_type_ui}
-                  onChange={(e) => onChange("leasing_type_ui", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving || modalReadOnly}
-                >
-                  <option value="Fully fitted">Fully fitted</option>
-                  <option value="Warm shell">Warm shell</option>
-                  <option value="Bare shell">Bare shell</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Max Units Allowed</label>
-                <input
-                  value={form.max_units_allowed_ui}
-                  onChange={(e) => onChange("max_units_allowed_ui", e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg border border-gray-200 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="10"
-                  disabled={saving || modalReadOnly}
-                />
-              </div>
-
-              <div className="md:col-span-2">
-                <div className="text-xs text-gray-500 mt-7">
-                  These settings are UI-only right now (not sent to backend) until API supports them.
                 </div>
               </div>
             </div>
@@ -752,7 +682,6 @@ const FloorSetupPage = () => {
                     ? "border-blue-200 bg-blue-50 text-blue-700"
                     : "border-gray-200 bg-white text-gray-700 hover:bg-gray-50"
                 }`}
-                title="Show only active floors"
               >
                 <Filter className="w-4 h-4" />
                 Active
@@ -762,7 +691,6 @@ const FloorSetupPage = () => {
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
                 className="h-10 px-3 rounded-lg border border-gray-200 bg-white text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                title="Filter by status"
               >
                 <option value="ALL">All</option>
                 <option value="AVAILABLE">Available</option>
@@ -828,8 +756,12 @@ const FloorSetupPage = () => {
                 filteredFloors.map((f) => (
                   <tr key={f.id} className="hover:bg-gray-50">
                     <td className="px-4 py-3">
-                      <div className="font-medium text-gray-800">{f.label || `Floor ${f.number}`}</div>
-                      <div className="text-xs text-gray-500">No: {f.number} • ID: {f.id}</div>
+                      <div className="font-medium text-gray-800">
+                        {f.label || `Floor ${f.number}`}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        No: {f.number} • ID: {f.id}
+                      </div>
                     </td>
 
                     <td className="px-4 py-3 font-medium text-gray-800">{fmtInt(f.total_area_sqft)}</td>
@@ -837,21 +769,13 @@ const FloorSetupPage = () => {
                     <td className="px-4 py-3 text-gray-800">{fmtInt(f.cam_area_sqft)}</td>
 
                     <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${statusChip(
-                          f.status
-                        )}`}
-                      >
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${statusChip(f.status)}`}>
                         {String(f.status || "—")}
                       </span>
                     </td>
 
                     <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${chipClass(
-                          !!f.is_active
-                        )}`}
-                      >
+                      <span className={`inline-flex items-center px-2 py-1 rounded-full border text-xs ${chipClass(!!f.is_active)}`}>
                         {!!f.is_active ? "Active" : "Inactive"}
                       </span>
                     </td>

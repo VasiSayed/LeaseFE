@@ -519,6 +519,59 @@ const Modal = ({ open, title, children, onClose, footer }) => {
   );
 };
 
+
+
+const Chip = ({ active, children, onClick, disabled = false }) => (
+  <button
+    type="button"
+    disabled={disabled}
+    onClick={onClick}
+    className={`px-3 py-2 text-xs rounded-full border transition ${
+      disabled ? "opacity-60 cursor-not-allowed" : "hover:bg-gray-50"
+    } ${
+      active
+        ? "bg-blue-50 border-blue-600 text-blue-700"
+        : "bg-white border-gray-200 text-gray-700"
+    }`}
+  >
+    {children}
+  </button>
+);
+
+const Pill = ({ tone = "gray", children }) => {
+  const tones = {
+    green: "bg-green-50 border-green-200 text-green-700",
+    blue: "bg-blue-50 border-blue-200 text-blue-700",
+    red: "bg-red-50 border-red-200 text-red-700",
+    gray: "bg-gray-50 border-gray-200 text-gray-600",
+    indigo: "bg-indigo-50 border-indigo-200 text-indigo-700",
+  };
+  return (
+    <span className={`text-[11px] px-2.5 py-1 rounded-full border ${tones[tone] || tones.gray}`}>
+      {children}
+    </span>
+  );
+};
+
+const StatTile = ({ label, value, accent = false }) => (
+  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+    <div className="text-[11px] text-gray-500">{label}</div>
+    <div className={`mt-1 text-sm font-semibold ${accent ? "text-gray-900" : "text-gray-800"} tabular-nums`}>
+      {value}
+    </div>
+  </div>
+);
+
+const ModePill = ({ mode }) => {
+  const m = String(mode || "").toUpperCase();
+  if (m === "FULL") return <Pill tone="green">FULL</Pill>;
+  if (m === "PARTIAL") return <Pill tone="blue">PARTIAL</Pill>;
+  if (m === "LOCKED") return <Pill tone="red">LOCKED</Pill>;
+  return <Pill tone="gray">{m || "—"}</Pill>;
+};
+
+
+
 /* ============================
    Main component
    ============================ */
@@ -528,6 +581,38 @@ const LeaseDetailPage = ({ onClose, leaseId, context }) => {
     () => (isNumberLike(leaseId) ? Number(leaseId) : null),
     [leaseId]
   );
+  
+const [availabilityTree, setAvailabilityTree] = useState(null);
+const [selectedTowerId, setSelectedTowerId] = useState(null);
+const [selectedFloorId, setSelectedFloorId] = useState(null);
+
+  // ✅ Index availability tree for fast lookups (floors/units -> ids)
+const availabilityIndex = useMemo(() => {
+  const floorsById = {};
+  const unitsById = {};
+  const unitsByFloorId = {};
+  const unitToFloorId = {};
+
+  for (const t of availabilityTree?.towers || []) {
+    for (const f of t?.floors || []) {
+      const fid = String(f.floor_id);
+      floorsById[fid] = f;
+
+      const units = Array.isArray(f.units) ? f.units : [];
+      unitsByFloorId[fid] = units;
+
+      for (const u of units) {
+        const uid = String(u.unit_id);
+        unitsById[uid] = u;
+        unitToFloorId[uid] = fid;
+      }
+    }
+  }
+
+  return { floorsById, unitsById, unitsByFloorId, unitToFloorId };
+}, [availabilityTree]);
+
+
 
   const ctx = useMemo(() => {
     const active = getActiveCtx();
@@ -548,6 +633,18 @@ const LeaseDetailPage = ({ onClose, leaseId, context }) => {
   }, [context]);
 
   const [stepIdx, setStepIdx] = useState(leaseDbId ? 1 : 0);
+// ✅ NEW: multi-floor selection + builder UI like screenshots
+const [selectedFloorIds, setSelectedFloorIds] = useState([]); // multi-select
+const [builderMode, setBuilderMode] = useState("MANUAL"); // MANUAL | PERCENT | FULL | NEED
+const [builderPercent, setBuilderPercent] = useState(50);
+const [builderNeedArea, setBuilderNeedArea] = useState("");
+const [floorTargets, setFloorTargets] = useState({}); // { [floorId]: targetSqft }
+
+// ✅ NEW: modal for “View units”
+const [unitsModalOpen, setUnitsModalOpen] = useState(false);
+
+// ✅ NEW: modal for “Edit split”
+const [editSplitUnitId, setEditSplitUnitId] = useState(null);
 
   const [sites, setSites] = useState([]);
   const [tenantsDir, setTenantsDir] = useState([]);
@@ -560,12 +657,176 @@ const LeaseDetailPage = ({ onClose, leaseId, context }) => {
 
   const [leaseDocs, setLeaseDocs] = useState([]);
 
+  // ✅ UI-only: unit search + filter (only for this step)
+const [unitQuery, setUnitQuery] = useState("");
+const [unitFilter, setUnitFilter] = useState("ALL"); // ALL | AVAILABLE | SELECTED
+
+
+
+
+
+const removeSelectionsForFloor = (floorId) => {
+  const fid = String(floorId);
+  const units = availabilityIndex.unitsByFloorId[fid] || [];
+  const unitIds = new Set(units.map((u) => String(u.unit_id)));
+
+  setUnitSelections((prev) => {
+    const next = { ...(prev || {}) };
+    for (const uid of Object.keys(next)) {
+      if (unitIds.has(String(uid))) delete next[uid];
+    }
+    return next;
+  });
+
+  setFloorTargets((prev) => {
+    const next = { ...(prev || {}) };
+    delete next[fid];
+    return next;
+  });
+};
+
+const toggleFloorChecked = (floorId) => {
+  const fid = String(floorId);
+
+  setSelectedFloorIds((prev) => {
+    const has = (prev || []).some((x) => String(x) === fid);
+    if (has) return (prev || []).filter((x) => String(x) !== fid);
+    return [...(prev || []), fid];
+  });
+
+  // If unchecking, also remove its units from selections
+  const isChecked = (selectedFloorIds || []).some((x) => String(x) === fid);
+  if (isChecked) {
+    removeSelectionsForFloor(fid);
+  } else {
+    setSelectedFloorId(fid); // focus this floor for “View units”
+  }
+};
+
+const greedyPickUnits = (units, target) => {
+  let remaining = toFloat(target, 0);
+  const next = {};
+
+  for (const u of units || []) {
+    if (remaining <= 0.01) break;
+
+    const avail = toFloat(u.available_area_sqft, 0);
+    if (avail <= 0) continue;
+
+    const unitId = String(u.unit_id);
+    const isResidential = String(u.unit_type || "").toUpperCase() === "RESIDENTIAL";
+    const divisible = !!u.is_divisible && !isResidential;
+
+    if (remaining >= avail - 0.01) {
+      next[unitId] = { allocation_mode: "FULL", segments: [] };
+      remaining -= avail;
+      continue;
+    }
+
+    if (divisible) {
+      const minDiv = toFloat(u.min_divisible_area_sqft, 0);
+      if (remaining >= minDiv && remaining > 0.01) {
+        next[unitId] = {
+          allocation_mode: "PARTIAL",
+          segments: [{ allocated_area_sqft: String(round2(remaining)) }],
+        };
+        remaining = 0;
+      }
+    }
+  }
+
+  const picked = round2(toFloat(target, 0) - remaining);
+  return { selections: next, picked };
+};
+
+const applyPickForFloor = (floorId, mode, value) => {
+  const fid = String(floorId);
+  const f = availabilityIndex.floorsById[fid];
+  const units = availabilityIndex.unitsByFloorId[fid] || [];
+
+  const floorAvail = toFloat(f?.floor_available_area_sqft, 0);
+  if (floorAvail <= 0) return;
+
+  // ensure floor is checked
+  setSelectedFloorIds((prev) => {
+    const has = (prev || []).some((x) => String(x) === fid);
+    return has ? prev : [...(prev || []), fid];
+  });
+
+  // remove existing selections for this floor first
+  const unitIds = new Set(units.map((u) => String(u.unit_id)));
+
+  let target = null;
+  let pickedMap = {};
+
+  if (mode === "FULL") {
+    target = floorAvail;
+    pickedMap = {};
+    for (const u of units) {
+      const avail = toFloat(u.available_area_sqft, 0);
+      if (avail <= 0) continue;
+      pickedMap[String(u.unit_id)] = { allocation_mode: "FULL", segments: [] };
+    }
+  } else if (mode === "PERCENT") {
+    const pct = Math.max(0, Math.min(100, Number(value || 0)));
+    target = (floorAvail * pct) / 100;
+    pickedMap = greedyPickUnits(units, target).selections;
+  } else if (mode === "CUSTOM") {
+    const n = toFloat(value, 0);
+    if (!(n > 0) || n > floorAvail) return;
+    target = n;
+    pickedMap = greedyPickUnits(units, target).selections;
+  }
+
+  setFloorTargets((prev) => ({ ...(prev || {}), [fid]: String(round2(target || 0)) }));
+
+  setUnitSelections((prev) => {
+    const next = { ...(prev || {}) };
+    for (const uid of Object.keys(next)) {
+      if (unitIds.has(String(uid))) delete next[uid];
+    }
+    return { ...next, ...pickedMap };
+  });
+};
+
+const autoPickFromBuilder = () => {
+  if (!selectedFloorIds?.length) return;
+
+  const t = toFloat(targetArea, 0);
+  if (!(t > 0)) return;
+
+  // rebuild selections across selected floors in order
+  let remaining = t;
+  const next = {};
+
+  for (const fid of selectedFloorIds) {
+    if (remaining <= 0.01) break;
+    const units = availabilityIndex.unitsByFloorId[String(fid)] || [];
+    const { selections, picked } = greedyPickUnits(units, remaining);
+    Object.assign(next, selections);
+    remaining -= picked;
+  }
+
+  setUnitSelections(next);
+  setFloorTargets({}); // builder is global; clear per-floor targets display
+};
+
+const clearAllAllocationUI = () => {
+  setUnitSelections({});
+  setFloorTargets({});
+  setBuilderMode("MANUAL");
+  setBuilderPercent(50);
+  setBuilderNeedArea("");
+};
+
+
+
+
+
 
   
 // ✅ NEW: availability tree + hierarchy selection
-const [availabilityTree, setAvailabilityTree] = useState(null);
-const [selectedTowerId, setSelectedTowerId] = useState(null);
-const [selectedFloorId, setSelectedFloorId] = useState(null);
+
 
 // ✅ NEW: floor selection mode + targets
 const [floorSelectMode, setFloorSelectMode] = useState("MANUAL"); 
@@ -755,6 +1016,35 @@ const selectedFloor = useMemo(() => {
 }, [selectedTower, selectedFloorId]);
 
 const floorUnits = useMemo(() => selectedFloor?.units || [], [selectedFloor]);
+const filteredFloorUnits = useMemo(() => {
+  const q = (unitQuery || "").trim().toLowerCase();
+
+  return (floorUnits || []).filter((u) => {
+    const unitId = String(u.unit_id);
+    const selected = !!unitSelections?.[unitId];
+    const avail = toFloat(u.available_area_sqft, 0);
+
+    if (unitFilter === "AVAILABLE" && !(avail > 0)) return false;
+    if (unitFilter === "SELECTED" && !selected) return false;
+
+    if (!q) return true;
+
+    const hay = [
+      u.unit_name,
+      u.unit_id,
+      u.unit_type,
+      u.total_area_sqft,
+      u.available_area_sqft,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+
+    return hay.includes(q);
+  });
+}, [floorUnits, unitQuery, unitFilter, unitSelections]);
+
+
 
 const floorAvailable = useMemo(
   () => toFloat(selectedFloor?.floor_available_area_sqft, 0),
@@ -762,14 +1052,14 @@ const floorAvailable = useMemo(
 );
 
 const selectedAreaTotal = useMemo(() => {
-  const entries = Object.entries(unitSelections || {});
   let sum = 0;
 
-  for (const [unitId, sel] of entries) {
-    const unit = (floorUnits || []).find((u) => String(u.unit_id) === String(unitId));
-    if (!unit) continue;
+  for (const [unitId, sel] of Object.entries(unitSelections || {})) {
+    const u = availabilityIndex.unitsById[String(unitId)];
+    if (!u) continue;
 
-    const avail = toFloat(unit.available_area_sqft, 0);
+    const avail = toFloat(u.available_area_sqft, 0);
+    if (avail <= 0) continue;
 
     if (sel?.allocation_mode === "FULL") {
       sum += avail;
@@ -782,19 +1072,63 @@ const selectedAreaTotal = useMemo(() => {
   }
 
   return round2(sum);
-}, [unitSelections, floorUnits]);
+}, [unitSelections, availabilityIndex]);
+
+
+
+const selectedAreaByFloor = useMemo(() => {
+  const map = {};
+  for (const [unitId, sel] of Object.entries(unitSelections || {})) {
+    const u = availabilityIndex.unitsById[String(unitId)];
+    const fid = availabilityIndex.unitToFloorId[String(unitId)];
+    if (!u || !fid) continue;
+
+    const avail = toFloat(u.available_area_sqft, 0);
+    if (avail <= 0) continue;
+
+    let picked = 0;
+    if (sel?.allocation_mode === "FULL") picked = avail;
+    else {
+      const segs = Array.isArray(sel?.segments) ? sel.segments : [];
+      picked = Math.min(
+        segs.reduce((s, x) => s + toFloat(x.allocated_area_sqft, 0), 0),
+        avail
+      );
+    }
+
+    map[fid] = round2((map[fid] || 0) + picked);
+  }
+  return map;
+}, [unitSelections, availabilityIndex]);
+
+const selectedFloorsAvailableTotal = useMemo(() => {
+  return round2(
+    (selectedFloorIds || []).reduce((s, fid) => {
+      const f = availabilityIndex.floorsById[String(fid)];
+      return s + toFloat(f?.floor_available_area_sqft, 0);
+    }, 0)
+  );
+}, [selectedFloorIds, availabilityIndex]);
+
+
+
+
+
 
 const targetArea = useMemo(() => {
-  if (floorSelectMode === "FULL_FLOOR") return round2(floorAvailable);
-  if (floorSelectMode === "PERCENT") return round2((floorAvailable * Number(floorPercent || 0)) / 100);
-  if (floorSelectMode === "CUSTOM_AREA") return round2(toFloat(floorCustomArea, 0));
-  return null; // MANUAL => no target
-}, [floorSelectMode, floorAvailable, floorPercent, floorCustomArea]);
+  if (builderMode === "FULL") return round2(selectedFloorsAvailableTotal);
+  if (builderMode === "PERCENT") {
+    return round2((selectedFloorsAvailableTotal * Number(builderPercent || 0)) / 100);
+  }
+  if (builderMode === "NEED") return round2(toFloat(builderNeedArea, 0));
+  return null;
+}, [builderMode, builderPercent, builderNeedArea, selectedFloorsAvailableTotal]);
 
 const remainingArea = useMemo(() => {
   if (targetArea === null) return null;
   return round2(targetArea - selectedAreaTotal);
 }, [targetArea, selectedAreaTotal]);
+
 
 
   const tenantOptions = useMemo(
@@ -1140,34 +1474,36 @@ const setUnitMode = (unit, mode) => {
   }
 };
 const selectionInvalid = useMemo(() => {
-  if (!availabilityTree || !selectedFloor) return false;
+  if (!availabilityTree) return false;
 
-  // custom area constraint
-  if (floorSelectMode === "CUSTOM_AREA") {
-    const n = toFloat(floorCustomArea, 0);
-    if (!(n > 0) || n > floorAvailable) return true;
+  // No floors selected but trying to build a target
+  if ((builderMode === "FULL" || builderMode === "PERCENT" || builderMode === "NEED") && (!selectedFloorIds || !selectedFloorIds.length)) {
+    return true;
   }
 
-  // per unit segment constraints
-  // and selected must not exceed target when target exists
+  // need area cannot exceed selected floors availability
+  if (builderMode === "NEED") {
+    const n = toFloat(builderNeedArea, 0);
+    if (!(n > 0) || n > selectedFloorsAvailableTotal) return true;
+  }
+
   if (targetArea !== null && selectedAreaTotal - targetArea > 0.01) return true;
 
-  // if target mode is percent/custom -> require exact fill (no remaining)
-  if ((floorSelectMode === "PERCENT" || floorSelectMode === "CUSTOM_AREA") && remainingArea !== null) {
-    if (!isZero(remainingArea)) return true;
-  }
+  // For FULL / PERCENT / NEED, require exact fill (remaining == 0)
+  if (builderMode !== "MANUAL" && remainingArea !== null && !isZero(remainingArea)) return true;
 
   return false;
 }, [
   availabilityTree,
-  selectedFloor,
-  floorSelectMode,
-  floorCustomArea,
-  floorAvailable,
-  targetArea,
+  builderMode,
+  builderNeedArea,
+  selectedFloorIds,
   selectedAreaTotal,
+  targetArea,
   remainingArea,
+  selectedFloorsAvailableTotal,
 ]);
+
 
 
 const buildItemsPayload = () => {
@@ -1246,41 +1582,121 @@ const buildItemsPayload = () => {
   return items;
 };
 
+// ✅ Build floor_targets exactly like backend sample
+const buildPropertyAllocationTerms = () => {
+  const site_id = toNum(formData.siteId);
+  const tower_id = selectedTowerId ? toNum(selectedTowerId) : null;
+
+  const selected_floor_ids = (selectedFloorIds || [])
+    .map((x) => toNum(x))
+    .filter((x) => isNumberLike(x));
+
+  const floor_targets = {};
+
+  for (const fidRaw of selectedFloorIds || []) {
+    const fid = String(fidRaw);
+    const f = availabilityIndex.floorsById[fid];
+    const floorAvail = round2(toFloat(f?.floor_available_area_sqft, 0));
+    const picked = round2(toFloat(selectedAreaByFloor?.[fid] || 0, 0));
+
+    let mode = "MANUAL";
+    let target_area_sqft = picked;
+
+    // Per-floor target applied
+    if (floorTargets?.[fid] != null && String(floorTargets[fid]).trim() !== "") {
+      mode = "CUSTOM";
+      target_area_sqft = round2(toFloat(floorTargets[fid], 0));
+    }
+
+    // Global builder overrides per-floor display (if used)
+    if (builderMode === "FULL") {
+      mode = "FULL";
+      target_area_sqft = floorAvail;
+    } else if (builderMode === "PERCENT") {
+      mode = "PERCENT";
+      target_area_sqft = round2((floorAvail * Number(builderPercent || 0)) / 100);
+      floor_targets[fid] = {
+        target_area_sqft,
+        mode,
+        percent: Number(builderPercent || 0),
+      };
+      continue;
+    } else if (builderMode === "NEED") {
+      // When NEED is used, we send per-floor actual picked area
+      mode = "CUSTOM";
+      target_area_sqft = picked;
+    }
+
+    floor_targets[fid] = { target_area_sqft, mode };
+  }
+
+  return {
+    site_id,
+    tower_id,
+    selected_floor_ids,
+    floor_targets,
+  };
+};
+
 const buildSubmitPayload = () => {
-  const tenantId = toNum(formData.tenantId);
-  const primaryContactId = toNum(formData.primaryContactId, null);
-  const siteId = toNum(formData.siteId);
+  const tenant_id = toNum(formData.tenantId);
+  const primary_contact_id = toNum(formData.primaryContactId, null);
+  const site_id = toNum(formData.siteId);
 
   const items = buildItemsPayload();
 
-  // optional audit UI selection
-  const ui_selection = {
-    tower_id: selectedTowerId ?? null,
-    floor_id: selectedFloorId ?? null,
-    target_floor_area_sqft: targetArea === null ? null : String(round2(targetArea)),
-    selection_mode: floorSelectMode,
+  // your existing "terms" (tenure/fitout/escalation/billing/ageing/ar...) re-used
+  const baseTerms = buildBundlePayload("DRAFT")?.lease?.terms || {};
+
+  // best-effort GST from tenant/kyc
+  const gst_no =
+    (selectedTenant?.gst_no ||
+      selectedTenant?.gstin ||
+      selectedTenant?.gst ||
+      newKYC?.gstin ||
+      "").trim() || null;
+
+  const terms = {
+    tenant: {
+      billing_address_id: null, // keep null unless you have it in UI
+      gst_no,
+    },
+    property_allocation: buildPropertyAllocationTerms(),
+
+    // keep your existing detailed terms inside "financials" (safe for backend storage)
+    financials: baseTerms,
+
+    // explicit invoice_plan block (like sample)
+    invoice_plan: {
+      invoice_generate_rule: formData.invoiceGenerateRule || "1ST_DAY_OF_MONTH",
+      grace_days: toNum(formData.invoiceGraceDays, 0),
+      late_fee_flat: parseFloat(stripMoney(formData.invoiceLateFeeFlat)) || 0,
+      interest_annual_percent: parseFloat(stripMoney(formData.invoiceInterestAnnualPercent)) || 0,
+    },
+
+    custom_fields: {},
+
+    // if you don’t have file_id flow yet, keep empty
+    attachments: [],
   };
 
   return {
     lease: {
-      lease_id: formData.leaseId,
-      version_number: formData.versionNumber,
       agreement_type: formData.agreementType,
-      landlord_scope_type: ctx.scopeType,
-      landlord_scope_id: Number(ctx.scopeId),
-      tenant: tenantId,
-      site_id: siteId,
-      primary_contact_id: primaryContactId,
       commencement_date: formData.leaseCommencementDate || null,
       expiry_date: formData.leaseExpiryDate || null,
-      terms: {
-        ...(buildBundlePayload("DRAFT")?.lease?.terms || {}), // reuse your existing terms builder safely
-        ui_selection,
-      },
+      primary_contact_id,
+      notes: (formData.notes || "").trim() || null,
+      tenant_id,
+      site_id,
+      landlord_scope_type: ctx.scopeType,
+      landlord_scope_id: toNum(ctx.scopeId),
     },
     items,
+    terms,
   };
 };
+
 
 
 const addSegment = (unit) => {
@@ -1312,19 +1728,23 @@ const updateSegment = (unitId, segIdx, value) => {
     return { ...(prev || {}), [id]: { ...cur, segments: nextSegs } };
   });
 };
+
 const handleFinalSubmit = async () => {
   setSaving(true);
   try {
     const payload = buildSubmitPayload();
 
-    if (!payload.lease.tenant) throw new Error("Tenant is required");
+    if (!payload.lease.tenant_id) throw new Error("Tenant is required");
     if (!payload.lease.site_id) throw new Error("Site is required");
-    if (!payload.lease.lease_id) throw new Error("Lease ID is required");
+    if (!payload.lease.commencement_date) throw new Error("Commencement date is required");
+    if (!payload.lease.expiry_date) throw new Error("Expiry date is required");
     if (!payload.items?.length) throw new Error("Select at least one unit / segment");
+    if (selectionInvalid) throw new Error("Allocation doesn’t match the target. Fix Remaining = 0.");
 
-    await leaseAPI.submitAgreement(payload);
+    const resp = await leaseAPI.submitAgreement(payload);
+
     alert("Lease submitted successfully");
-    if (onClose) onClose();
+    if (onClose) onClose(resp);
   } catch (e) {
     alert(e?.message || "Submit failed");
   } finally {
@@ -1666,22 +2086,27 @@ const removeSegment = (unitId, segIdx) => {
 
     try {
       const resp = await leaseAPI.getAvailabilityTree(formData.siteId, 1);
+if (!mounted) return;
 
-      if (!mounted) return;
+const towers = resp?.towers || [];
+const t0 = towers[0] || null;
+const f0 = t0?.floors?.[0] || null;
 
-      setAvailabilityTree(resp || null);
+setAvailabilityTree(resp || null);
+setSelectedTowerId(t0?.tower_id ?? null);
+setSelectedFloorId(f0?.floor_id ?? null);
 
-      const towers = resp?.towers || [];
-      const t0 = towers?.[0] || null;
-      const f0 = t0?.floors?.[0] || null;
+// choose one behavior (default select first floor OR empty)
+// Option A: default select first floor:
+setSelectedFloorIds(f0?.floor_id ? [String(f0.floor_id)] : []);
 
-      setSelectedTowerId(t0?.tower_id ?? null);
-      setSelectedFloorId(f0?.floor_id ?? null);
+// reset selections
+setUnitSelections({});
+setFloorTargets({});
+setBuilderMode("MANUAL");
+setBuilderNeedArea("");
 
-      // reset selections on site change
-      setUnitSelections({});
-      setFloorSelectMode("MANUAL");
-      setFloorCustomArea("");
+
     } catch (e) {
       if (!mounted) return;
       setAvailabilityTree(null);
@@ -1831,32 +2256,45 @@ const removeSegment = (unitId, segIdx) => {
     };
   };
 
-  const handleSave = async (mode) => {
-    setSaving(true);
-    try {
-      const statusApi =
-        mode === "DRAFT"
-          ? "DRAFT"
-          : STATUS_UI_TO_API[formData.status] || "ACTIVE";
+  // ✅ Save (Draft/Normal) — FIXED (await is inside async)
+const handleSave = async (mode = "ACTIVE") => {
+  setSaving(true);
+  try {
+    // If you want draft via submitAgreement:
+    if (mode === "DRAFT") {
+      const payload = buildSubmitPayload(); // buildSubmitPayload has no args in your code
 
-      const payload = buildBundlePayload(statusApi);
+      // Draft: keep validations light (adjust as you want)
+      if (!payload?.lease?.tenant_id) throw new Error("Tenant is required");
+      if (!payload?.lease?.site_id) throw new Error("Site is required");
 
-      if (!payload.lease.tenant) throw new Error("Tenant is required");
-      if (!payload.lease.site_id) throw new Error("Site (Property/Building) is required");
-      if (!payload.lease.lease_id) throw new Error("Lease ID is required");
+      const resp = await leaseAPI.submitAgreement(payload);
 
-      const resp = leaseDbId
-        ? await leaseAPI.updateLeaseBundle(leaseDbId, payload)
-        : await leaseAPI.createLeaseBundle(payload);
-
-      alert(mode === "DRAFT" ? "Draft saved" : "Lease saved");
+      alert("Draft saved");
       if (onClose) onClose(resp);
-    } catch (e) {
-      alert(e?.message || "Save failed");
-    } finally {
-      setSaving(false);
+      return;
     }
-  };
+
+    // Normal save via bundle (your existing behavior)
+    const statusApi = STATUS_UI_TO_API[formData.status] || "ACTIVE";
+    const payload = buildBundlePayload(statusApi);
+
+    if (!payload?.lease?.tenant) throw new Error("Tenant is required");
+    if (!payload?.lease?.site_id) throw new Error("Site (Property/Building) is required");
+    if (!payload?.lease?.lease_id) throw new Error("Lease ID is required");
+
+    const resp = leaseDbId
+      ? await leaseAPI.updateLeaseBundle(leaseDbId, payload)
+      : await leaseAPI.createLeaseBundle(payload);
+
+    alert("Lease saved");
+    if (onClose) onClose(resp);
+  } catch (e) {
+    alert(e?.message || "Save failed");
+  } finally {
+    setSaving(false);
+  }
+};
 
   const uploadDoc = async (file, docTypeArg = "AGREEMENT", title = "") => {
     if (!leaseDbId) {
@@ -2254,268 +2692,934 @@ const selectCustomArea = (val) => {
             )}
           </Card>
         );
-        case "property":
+        case "property": {
+  const towerOptionsLocal = (availabilityTree?.towers || []).map((t) => ({
+    value: String(t.tower_id),
+    label: t.tower_name || `Tower ${t.tower_id}`,
+  }));
+
+  const floors = selectedTower?.floors || [];
+
+  // Selected Units table rows (across all selected floors)
+  const selectedUnitRows = Object.entries(unitSelections || {})
+    .map(([unitId, sel]) => {
+      const u = availabilityIndex.unitsById[String(unitId)];
+      if (!u) return null;
+
+      const avail = round2(toFloat(u.available_area_sqft, 0));
+      const isResidential = String(u.unit_type || "").toUpperCase() === "RESIDENTIAL";
+      const divisible = !!u.is_divisible && !isResidential;
+
+      let selectedSqft = 0;
+      let mode = sel?.allocation_mode || (divisible ? "PARTIAL" : "FULL");
+
+      if (mode === "FULL") selectedSqft = avail;
+      else {
+        const segs = Array.isArray(sel?.segments) ? sel.segments : [];
+        selectedSqft = round2(segs.reduce((s, x) => s + toFloat(x.allocated_area_sqft, 0), 0));
+        selectedSqft = Math.min(selectedSqft, avail);
+        mode = "PARTIAL";
+      }
+
+      const typeLabel = `${u.unit_type || "—"}${
+        divisible ? " (Divisible)" : isResidential ? "" : " (Non-div)"
+      }`;
+
+      return {
+        unitId: String(unitId),
+        name: u.unit_name || `Unit ${u.unit_id}`,
+        typeLabel,
+        avail,
+        divisible,
+        mode,
+        selectedSqft,
+      };
+    })
+    .filter(Boolean);
+
+  const totalUnitsSelected = selectedUnitRows.length;
+  const totalFloorsSelected = selectedFloorIds?.length || 0;
+
   return (
-    <Card title="Property & Units" subtitle="Select tower → floor → units. Supports full/partial floor and unit segments.">
-      <div className="grid grid-cols-2 gap-4">
-        <Select
-          label="Property (Site)*"
-          value={formData.siteId}
-          onChange={(v) => handleInputChange("siteId", v)}
-          options={siteOptions}
-        />
-        <div />
+    <div className="space-y-4">
+      {/* Top bar like screenshot */}
+      <div className="bg-white border border-gray-200 rounded-xl p-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div>
+            <div className="text-xl font-semibold text-gray-900">Lease Allocation</div>
+            <div className="text-xs text-gray-500 mt-1">
+              Select floors, enter required area, auto-pick units. Edit split areas only if needed.
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+            <select
+              value={formData.siteId || ""}
+              onChange={(e) => handleInputChange("siteId", e.target.value)}
+              disabled={!tenantReady}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+              title="Site"
+            >
+              <option value="">Site: Select...</option>
+              {siteOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={selectedTowerId || ""}
+              onChange={(e) => {
+                const nextTid = e.target.value || null;
+                setSelectedTowerId(nextTid);
+
+                const t = (availabilityTree?.towers || []).find(
+                  (x) => String(x.tower_id) === String(nextTid)
+                );
+                const f0 = t?.floors?.[0] || null;
+
+                setSelectedFloorId(f0?.floor_id ?? null);
+                setSelectedFloorIds(f0?.floor_id ? [String(f0.floor_id)] : []);
+                clearAllAllocationUI();
+              }}
+              disabled={!availabilityTree}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+              title="Tower"
+            >
+              <option value="">Tower: Select...</option>
+              {towerOptionsLocal.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+
+            <button
+              type="button"
+              onClick={clearAllAllocationUI}
+              className="px-4 py-2 border border-gray-300 rounded-lg text-sm bg-white hover:bg-gray-50"
+            >
+              Clear
+            </button>
+
+            {/* <button
+              type="button"
+              onClick={handleFinalSubmit}
+              disabled={saving || selectionInvalid || !totalUnitsSelected}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-60"
+            >
+              Submit
+            </button> */}
+          </div>
+        </div>
       </div>
 
       {!availabilityTree ? (
-        <div className="mt-4 text-sm text-gray-600">Select a Site to load availability...</div>
+        <div className="text-sm text-gray-600">Select a Site to load availability...</div>
       ) : (
-        <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {/* LEFT: Towers */}
-          <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
-            <div className="px-4 py-3 bg-gray-50 text-xs font-semibold text-gray-700">Towers</div>
-            <div className="divide-y divide-gray-200">
-              {(availabilityTree?.towers || []).map((t) => (
-                <button
-                  key={t.tower_id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedTowerId(t.tower_id);
-                    const f0 = t?.floors?.[0] || null;
-                    setSelectedFloorId(f0?.floor_id ?? null);
-                    setUnitSelections({});
-                    setFloorSelectMode("MANUAL");
-                    setFloorCustomArea("");
-                  }}
-                  className={`w-full text-left px-4 py-3 text-sm hover:bg-gray-50 ${
-                    String(t.tower_id) === String(selectedTowerId) ? "bg-blue-50" : ""
-                  }`}
-                >
-                  <div className="font-medium text-gray-900">{t.tower_name || `Tower ${t.tower_id}`}</div>
-                  <div className="text-xs text-gray-500">{(t.floors || []).length} floors</div>
-                </button>
-              ))}
-            </div>
-          </div>
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* LEFT: Floors */}
+          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+              <div className="text-sm font-semibold text-gray-800">Floors</div>
 
-          {/* MIDDLE: Floors + floor selection */}
-          <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
-            <div className="px-4 py-3 bg-gray-50">
-              <div className="text-xs font-semibold text-gray-700">Floors</div>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={selectFullFloor}
-                  className="px-3 py-1.5 text-xs rounded-md border border-gray-200 hover:bg-gray-50"
-                >
-                  Select FULL Floor
-                </button>
-                {[25, 50, 75].map((p) => (
-                  <button
-                    key={p}
-                    type="button"
-                    onClick={() => selectPercentFloor(p)}
-                    className="px-3 py-1.5 text-xs rounded-md border border-gray-200 hover:bg-gray-50"
-                  >
-                    {p}% Floor
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-3">
-                <label className="block text-xs font-semibold text-gray-700 mb-1">
-                  Custom Area (sqft)
-                </label>
-                <input
-                  type="number"
-                  value={floorCustomArea}
-                  onChange={(e) => selectCustomArea(e.target.value)}
-                  placeholder={`<= ${round2(floorAvailable)} sqft`}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                />
-                <div className="mt-2 text-xs text-gray-600 space-y-1">
-                  <div className="flex justify-between">
-                    <span>Floor Available</span>
-                    <span className="font-medium">{round2(floorAvailable)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Target</span>
-                    <span className="font-medium">{targetArea === null ? "—" : round2(targetArea)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Selected</span>
-                    <span className="font-medium">{round2(selectedAreaTotal)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Remaining</span>
-                    <span className={`font-medium ${remainingArea !== null && remainingArea < -0.01 ? "text-red-600" : ""}`}>
-                      {remainingArea === null ? "—" : round2(remainingArea)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="divide-y divide-gray-200">
-              {(selectedTower?.floors || []).map((f) => {
-                const isActive = String(f.floor_id) === String(selectedFloorId);
-                return (
-                  <button
-                    key={f.floor_id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedFloorId(f.floor_id);
-                      setUnitSelections({});
-                      setFloorSelectMode("MANUAL");
-                      setFloorCustomArea("");
-                    }}
-                    className={`w-full text-left px-4 py-3 text-sm hover:bg-gray-50 ${isActive ? "bg-blue-50" : ""}`}
-                  >
-                    <div className="font-medium text-gray-900">
-                      {f.floor_name || `Floor ${f.floor_number ?? f.floor_id}`}
-                    </div>
-                    <div className="text-xs text-gray-500">
-                      Available: {round2(toFloat(f.floor_available_area_sqft, 0))} / Total: {round2(toFloat(f.floor_total_area_sqft, 0))}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* RIGHT: Units + segments */}
-          <div className="border border-gray-200 rounded-lg overflow-hidden bg-white">
-            <div className="px-4 py-3 bg-gray-50 text-xs font-semibold text-gray-700">Units</div>
-
-            <div className="divide-y divide-gray-200">
-              {(floorUnits || []).map((u) => {
-                const unitId = String(u.unit_id);
-                const avail = toFloat(u.available_area_sqft, 0);
-                const selected = !!unitSelections?.[unitId];
-                const isResidential = String(u.unit_type || "").toUpperCase() === "RESIDENTIAL";
-                const divisible = !!u.is_divisible && !isResidential;
-                const disabled = avail <= 0;
-
-                const sel = unitSelections?.[unitId] || null;
-                const segs = Array.isArray(sel?.segments) ? sel.segments : [];
-                const segSum = round2(segs.reduce((s, x) => s + toFloat(x.allocated_area_sqft, 0), 0));
-
-                return (
-                  <div key={unitId} className={`px-4 py-3 ${disabled ? "opacity-60" : ""}`}>
-                    <div className="flex items-start justify-between gap-3">
-                      <button
-                        type="button"
-                        disabled={disabled}
-                        onClick={() => toggleUnit(u)}
-                        className={`text-left flex-1 ${disabled ? "cursor-not-allowed" : ""}`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <div className={`w-4 h-4 rounded border ${selected ? "bg-blue-600 border-blue-600" : "bg-white border-gray-300"}`} />
-                          <div className="font-medium text-gray-900">{u.unit_name || `Unit ${u.unit_id}`}</div>
-                          <div className="text-xs px-2 py-0.5 rounded-full border border-gray-200 text-gray-600">
-                            {u.unit_type || "—"}
-                          </div>
-                        </div>
-
-                        <div className="mt-1 text-xs text-gray-600 flex flex-wrap gap-2">
-                          <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200">
-                            Total: {round2(toFloat(u.total_area_sqft, 0))}
-                          </span>
-                          <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200">
-                            Reserved: {round2(toFloat(u.reserved_area_sqft, 0))}
-                          </span>
-                          <span className={`px-2 py-0.5 rounded border ${avail > 0 ? "bg-green-50 border-green-200 text-green-700" : "bg-red-50 border-red-200 text-red-700"}`}>
-                            Available: {round2(avail)}
-                          </span>
-                          {disabled ? (
-                            <span className="px-2 py-0.5 rounded bg-red-50 border border-red-200 text-red-700">
-                              Fully Reserved / Not Available
-                            </span>
-                          ) : null}
-                        </div>
-                      </button>
-
-                      {selected && divisible ? (
-                        <div className="shrink-0">
-                          <select
-                            value={sel?.allocation_mode || "PARTIAL"}
-                            onChange={(e) => setUnitMode(u, e.target.value)}
-                            className="px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-white"
-                          >
-                            <option value="FULL">FULL</option>
-                            <option value="PARTIAL">PARTIAL</option>
-                          </select>
-                        </div>
-                      ) : selected ? (
-                        <div className="text-xs text-gray-700 font-semibold">
-                          {isResidential || !u.is_divisible ? "FULL" : sel?.allocation_mode || "—"}
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {/* selection details */}
-                    {selected ? (
-                      <div className="mt-3">
-                        {(!divisible || (sel?.allocation_mode === "FULL")) ? (
-                          <div className="text-xs text-gray-700">
-                            Selected Area: <b>{round2(avail)}</b> sqft (FULL)
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <div className="text-xs text-gray-700 flex justify-between">
-                              <span>Selected Area (segments sum)</span>
-                              <span className="font-semibold">{segSum} / {round2(avail)} sqft</span>
-                            </div>
-
-                            {segs.map((s, i) => (
-                              <div key={i} className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  value={s.allocated_area_sqft ?? ""}
-                                  onChange={(e) => updateSegment(unitId, i, e.target.value)}
-                                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm"
-                                  placeholder={`>= ${u.min_divisible_area_sqft ?? 0}`}
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => removeSegment(unitId, i)}
-                                  className="px-2 py-2 text-xs border border-gray-200 rounded-md hover:bg-gray-50"
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            ))}
-
-                            <button
-                              type="button"
-                              onClick={() => addSegment(u)}
-                              className="px-3 py-2 text-xs border border-gray-200 rounded-md hover:bg-gray-50"
-                            >
-                              + Add segment
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="px-4 py-3 bg-gray-50 border-t border-gray-200">
               <button
                 type="button"
-                onClick={clearUnitSelections}
-                className="px-3 py-2 text-xs border border-gray-200 rounded-md hover:bg-white"
+                onClick={() => {
+                  // apply 50% to each selected floor
+                  for (const fid of selectedFloorIds || []) {
+                    applyPickForFloor(fid, "PERCENT", 50);
+                  }
+                }}
+                className="text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50"
               >
-                Clear Selection
+                Apply 50% to Selected
               </button>
+            </div>
+
+            <div className="divide-y divide-gray-200">
+              {floors.map((f) => {
+                const fid = String(f.floor_id);
+                const checked = (selectedFloorIds || []).some((x) => String(x) === fid);
+
+                const total = round2(toFloat(f.floor_total_area_sqft, 0));
+                const avail = round2(toFloat(f.floor_available_area_sqft, 0));
+                const reserved = round2(Math.max(0, total - avail));
+
+                const picked = round2(toFloat(selectedAreaByFloor[fid] || 0, 0));
+
+                const status =
+                  avail <= 0
+                    ? { t: "red", label: "UNAVAILABLE" }
+                    : picked >= avail - 0.01
+                    ? { t: "green", label: "FULL" }
+                    : picked > 0
+                    ? { t: "blue", label: "PARTIAL" }
+                    : { t: "green", label: "AVAILABLE" };
+
+                const floorTarget = floorTargets?.[fid] ? round2(toFloat(floorTargets[fid], 0)) : null;
+                const floorRemaining = floorTarget == null ? null : round2(floorTarget - picked);
+
+                return (
+                  <div key={fid} className="p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleFloorChecked(fid)}
+                          className="mt-1"
+                        />
+                        <div className="min-w-0">
+                          <div className="font-semibold text-gray-900 truncate">
+                            {f.floor_name || `Floor ${f.floor_number ?? f.floor_id}`}
+                          </div>
+
+                          <div className="mt-2 grid grid-cols-3 gap-2 text-[11px] text-gray-600">
+                            <div>
+                              <div className="text-gray-400">Total</div>
+                              <div className="font-semibold text-gray-800 tabular-nums">{total.toLocaleString()} sqft</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-400">Reserved</div>
+                              <div className="font-semibold text-gray-800 tabular-nums">{reserved.toLocaleString()} sqft</div>
+                            </div>
+                            <div>
+                              <div className="text-gray-400">Available</div>
+                              <div className="font-semibold text-gray-800 tabular-nums">{avail.toLocaleString()} sqft</div>
+                            </div>
+                          </div>
+                        </div>
+                      </label>
+
+                      <div className="shrink-0 flex flex-col items-end gap-2">
+                        <Pill tone={status.t}>{status.label}</Pill>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedFloorId(fid);
+                            setUnitsModalOpen(true);
+                          }}
+                          className="text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50"
+                        >
+                          View units
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Per-floor quick chips like screenshot */}
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Chip disabled={!checked || avail <= 0} onClick={() => applyPickForFloor(fid, "FULL")}>
+                        FULL
+                      </Chip>
+                      {[25, 50, 75].map((p) => (
+                        <Chip
+                          key={p}
+                          disabled={!checked || avail <= 0}
+                          onClick={() => applyPickForFloor(fid, "PERCENT", p)}
+                        >
+                          {p}%
+                        </Chip>
+                      ))}
+                    </div>
+
+                    {/* Custom area */}
+                    <div className="mt-3">
+                      <div className="text-[11px] font-semibold text-gray-700 mb-1">Custom Area (sqft)</div>
+                      <input
+                        type="number"
+                        disabled={!checked || avail <= 0}
+                        placeholder="Enter sqft..."
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            applyPickForFloor(fid, "CUSTOM", e.currentTarget.value);
+                          }
+                        }}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white disabled:opacity-60"
+                      />
+                      <div className="text-[11px] text-gray-500 mt-1">
+                        Press Enter to apply (max {avail.toLocaleString()} sqft)
+                      </div>
+                    </div>
+
+                    {/* Per-floor target/selected/remaining */}
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      <StatTile label="Target" value={floorTarget == null ? "—" : `${floorTarget.toLocaleString()} sqft`} />
+                      <StatTile label="Selected" value={`${picked.toLocaleString()} sqft`} accent />
+                      <StatTile
+                        label="Remaining"
+                        value={floorRemaining == null ? "—" : `${floorRemaining.toLocaleString()} sqft`}
+                        accent={floorRemaining != null && Math.abs(floorRemaining) < 0.01}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* RIGHT: Allocation Builder + Selected Units */}
+          <div className="lg:col-span-2 space-y-4">
+            {/* Allocation Builder */}
+            <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-gray-800">Allocation Builder</div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    Enter required sqft OR use % chips, then Auto Pick
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={autoPickFromBuilder}
+                  disabled={selectionInvalid || builderMode === "MANUAL"}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-60"
+                >
+                  Auto Pick
+                </button>
+              </div>
+
+              <div className="p-4">
+                <div className="flex flex-col md:flex-row md:items-center gap-3">
+                  <div className="flex-1">
+                    <div className="text-xs font-semibold text-gray-700 mb-1">Need area</div>
+                    <input
+                      value={builderNeedArea}
+                      onChange={(e) => {
+                        setBuilderNeedArea(e.target.value);
+                        setBuilderMode(e.target.value.trim() ? "NEED" : "MANUAL");
+                      }}
+                      placeholder="Enter sqft (e.g., 4200)"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    />
+                    <div className="text-[11px] text-gray-500 mt-1">
+                      Tip: Select floors first. FULL means “use all available area from selected floors”.
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {[25, 50, 75].map((p) => (
+                      <Chip
+                        key={p}
+                        active={builderMode === "PERCENT" && Number(builderPercent) === p}
+                        onClick={() => {
+                          setBuilderMode("PERCENT");
+                          setBuilderPercent(p);
+                          setBuilderNeedArea("");
+                        }}
+                      >
+                        {p}%
+                      </Chip>
+                    ))}
+                    <Chip
+                      active={builderMode === "FULL"}
+                      onClick={() => {
+                        setBuilderMode("FULL");
+                        setBuilderNeedArea("");
+                      }}
+                    >
+                      FULL
+                    </Chip>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <StatTile label="Floors Selected" value={String(totalFloorsSelected)} />
+                  <StatTile label="Floor Available Total" value={`${selectedFloorsAvailableTotal.toLocaleString()} sqft`} />
+                  <StatTile
+                    label="Remaining"
+                    value={remainingArea == null ? "0" : `${remainingArea.toLocaleString()} sqft`}
+                    accent
+                  />
+                </div>
+
+                {selectionInvalid ? (
+                  <div className="mt-3 text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg p-3">
+                    Allocation doesn’t match the target (or target is invalid). Adjust floors/target and run Auto Pick again.
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Selected Units */}
+            <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+                <div className="text-sm font-semibold text-gray-800">
+                  Selected Units <span className="text-gray-500 font-normal">— {totalUnitsSelected} units selected</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUnitSelections({})}
+                  className="text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white hover:bg-gray-50"
+                >
+                  Clear Selected
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-white">
+                    <tr className="text-xs text-gray-500 border-b border-gray-200">
+                      <th className="text-left px-4 py-3">Unit</th>
+                      <th className="text-left px-4 py-3">Type</th>
+                      <th className="text-left px-4 py-3">Avail</th>
+                      <th className="text-left px-4 py-3">Mode</th>
+                      <th className="text-left px-4 py-3">Selected</th>
+                      <th className="text-right px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y divide-gray-200">
+                    {selectedUnitRows.length ? (
+                      selectedUnitRows.map((r) => (
+                        <tr key={r.unitId} className="align-top">
+                          <td className="px-4 py-3 font-medium text-gray-900">{r.name}</td>
+                          <td className="px-4 py-3 text-gray-700">{r.typeLabel}</td>
+                          <td className="px-4 py-3 text-gray-700 tabular-nums">{r.avail.toLocaleString()}</td>
+                          <td className="px-4 py-3">
+                            <ModePill mode={r.avail <= 0 ? "LOCKED" : r.mode} />
+                          </td>
+                          <td className="px-4 py-3 font-semibold text-gray-900 tabular-nums">
+                            {r.selectedSqft.toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3 text-right whitespace-nowrap">
+                            {r.divisible ? (
+                              <button
+                                type="button"
+                                onClick={() => setEditSplitUnitId(r.unitId)}
+                                className="text-xs text-blue-600 hover:text-blue-700"
+                              >
+                                Edit split
+                              </button>
+                            ) : (
+                              <span className="text-xs text-gray-400">—</span>
+                            )}
+                            <span className="text-gray-300 mx-2">·</span>
+                            <button
+                              type="button"
+                              onClick={() => removeSelection(r.unitId)}
+                              className="text-xs text-blue-600 hover:text-blue-700"
+                            >
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className="px-4 py-6 text-gray-500" colSpan={6}>
+                          No units selected.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="p-4 bg-white">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <StatTile label="Total Floors" value={String(totalFloorsSelected)} />
+                  <StatTile label="Total Units" value={String(totalUnitsSelected)} />
+                  <StatTile label="Total Allocated" value={`${selectedAreaTotal.toLocaleString()} sqft`} accent />
+                  <StatTile
+                    label="Remaining"
+                    value={remainingArea == null ? "0" : `${remainingArea.toLocaleString()} sqft`}
+                    accent
+                  />
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <StatTile label="Total Units" value={String(totalUnitsSelected)} />
+                  <StatTile label="Total Selected Area" value={`${selectedAreaTotal.toLocaleString()} sqft`} accent />
+                  <StatTile label="Target" value={targetArea == null ? "0" : `${targetArea.toLocaleString()} sqft`} />
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
-    </Card>
+    </div>
   );
+}
+
+  //      case "property":
+  // return (
+  //   <Card
+  //     title="Property & Units"
+  //     subtitle="Select Tenant → Site → Tower → Floor → Units (full/partial + segments)."
+  //   >
+  //     {/* ✅ TOP ROW: Tenant + Property (as you asked) */}
+  //     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+  //       <div className="lg:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+  //         <Select
+  //           label="Tenant*"
+  //           value={formData.tenantId}
+  //           onChange={(v) => {
+  //             // keep behaviour same as your existing tenant select
+  //             if (leaseDbId) return;
+  //             handleExistingTenantSelect(v);
+  //           }}
+  //           options={tenantOptions}
+  //           disabled={!!leaseDbId}
+  //           helper={
+  //             leaseDbId
+  //               ? "Tenant locked for existing lease."
+  //               : "Select tenant here or from Tenant Setup step."
+  //           }
+  //         />
+
+  //         <Select
+  //           label="Property (Site)*"
+  //           value={formData.siteId}
+  //           onChange={(v) => handleInputChange("siteId", v)}
+  //           options={siteOptions}
+  //           disabled={!tenantReady}
+  //           helper={!tenantReady ? "Select Tenant first." : ""}
+  //         />
+  //       </div>
+
+  //       {/* ✅ Small status box (right side) */}
+  //       <div className="border border-gray-200 rounded-lg bg-gray-50 p-3">
+  //         <div className="text-xs font-semibold text-gray-700">Selection Summary</div>
+
+  //         <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
+  //           <div className="text-gray-500">Tower</div>
+  //           <div className="text-gray-900 font-medium truncate">
+  //             {selectedTower?.tower_name || (selectedTowerId ? `#${selectedTowerId}` : "—")}
+  //           </div>
+
+  //           <div className="text-gray-500">Floor</div>
+  //           <div className="text-gray-900 font-medium truncate">
+  //             {selectedFloor?.floor_name ||
+  //               (selectedFloorId ? `#${selectedFloorId}` : "—")}
+  //           </div>
+
+  //           <div className="text-gray-500">Target</div>
+  //           <div className="text-gray-900 font-medium">
+  //             {targetArea === null ? "—" : `${round2(targetArea)} sqft`}
+  //           </div>
+
+  //           <div className="text-gray-500">Selected</div>
+  //           <div className={`font-semibold ${selectionInvalid ? "text-red-700" : "text-gray-900"}`}>
+  //             {round2(selectedAreaTotal)} sqft
+  //           </div>
+
+  //           <div className="text-gray-500">Remaining</div>
+  //           <div className={`font-semibold ${remainingArea !== null && remainingArea < -0.01 ? "text-red-700" : "text-gray-900"}`}>
+  //             {remainingArea === null ? "—" : `${round2(remainingArea)} sqft`}
+  //           </div>
+  //         </div>
+
+  //         {!leaseDbId ? (
+  //           <button
+  //             type="button"
+  //             onClick={() => setStepIdx(0)}
+  //             className="mt-3 w-full px-3 py-2 text-xs border border-gray-200 bg-white rounded-md hover:bg-gray-50"
+  //           >
+  //             Change / Create Tenant
+  //           </button>
+  //         ) : null}
+  //       </div>
+  //     </div>
+
+  //     {/* ✅ guard */}
+  //     {!tenantReady ? (
+  //       <div className="mt-4 text-sm text-gray-600">
+  //         Select Tenant first to enable Property selection.
+  //       </div>
+  //     ) : null}
+
+  //     {!availabilityTree ? (
+  //       <div className="mt-4 text-sm text-gray-600">
+  //         Select a Site to load availability...
+  //       </div>
+  //     ) : (
+  //       <div className="mt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
+  //         {/* ================= LEFT: Towers ================= */}
+  //         <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
+  //           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+  //             <div className="text-xs font-semibold text-gray-700">Towers</div>
+  //             <div className="text-[11px] text-gray-500">
+  //               {(availabilityTree?.towers || []).length} total
+  //             </div>
+  //           </div>
+
+  //           <div className="divide-y divide-gray-200">
+  //             {(availabilityTree?.towers || []).map((t) => {
+  //               const active = String(t.tower_id) === String(selectedTowerId);
+  //               return (
+  //                 <button
+  //                   key={t.tower_id}
+  //                   type="button"
+  //                   onClick={() => {
+  //                     setSelectedTowerId(t.tower_id);
+  //                     const f0 = t?.floors?.[0] || null;
+  //                     setSelectedFloorId(f0?.floor_id ?? null);
+  //                     setUnitSelections({});
+  //                     setFloorSelectMode("MANUAL");
+  //                     setFloorCustomArea("");
+  //                     setUnitQuery("");
+  //                     setUnitFilter("ALL");
+  //                   }}
+  //                   className={`w-full text-left px-4 py-3 hover:bg-gray-50 ${
+  //                     active ? "bg-blue-50" : ""
+  //                   }`}
+  //                 >
+  //                   <div className="flex items-center justify-between gap-2">
+  //                     <div className="font-medium text-gray-900 truncate">
+  //                       {t.tower_name || `Tower ${t.tower_id}`}
+  //                     </div>
+  //                     {active ? (
+  //                       <span className="text-[11px] px-2 py-0.5 rounded-full bg-blue-600 text-white">
+  //                         Active
+  //                       </span>
+  //                     ) : null}
+  //                   </div>
+  //                   <div className="mt-0.5 text-xs text-gray-500">
+  //                     {(t.floors || []).length} floors
+  //                   </div>
+  //                 </button>
+  //               );
+  //             })}
+  //           </div>
+  //         </div>
+
+  //         {/* ================= MIDDLE: Floors ================= */}
+  //         <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
+  //           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+  //             <div className="flex items-center justify-between">
+  //               <div className="text-xs font-semibold text-gray-700">Floors</div>
+  //               <button
+  //                 type="button"
+  //                 onClick={() => {
+  //                   setFloorSelectMode("MANUAL");
+  //                   setFloorCustomArea("");
+  //                   setFloorPercent(50);
+  //                   setUnitSelections({});
+  //                 }}
+  //                 className="text-[11px] px-2 py-1 rounded-md border border-gray-200 bg-white hover:bg-gray-50"
+  //               >
+  //                 Reset
+  //               </button>
+  //             </div>
+
+  //             {/* quick pick */}
+  //             <div className="mt-3 flex flex-wrap gap-2">
+  //               <button
+  //                 type="button"
+  //                 onClick={selectFullFloor}
+  //                 className="px-3 py-1.5 text-xs rounded-md border border-gray-200 bg-white hover:bg-gray-50"
+  //               >
+  //                 FULL Floor
+  //               </button>
+  //               {[25, 50, 75].map((p) => (
+  //                 <button
+  //                   key={p}
+  //                   type="button"
+  //                   onClick={() => selectPercentFloor(p)}
+  //                   className={`px-3 py-1.5 text-xs rounded-md border ${
+  //                     floorSelectMode === "PERCENT" && Number(floorPercent) === p
+  //                       ? "border-blue-600 bg-blue-50 text-blue-700"
+  //                       : "border-gray-200 bg-white hover:bg-gray-50"
+  //                   }`}
+  //                 >
+  //                   {p}%
+  //                 </button>
+  //               ))}
+  //             </div>
+
+  //             {/* custom area */}
+  //             <div className="mt-3">
+  //               <label className="block text-xs font-semibold text-gray-700 mb-1">
+  //                 Custom Area (sqft)
+  //               </label>
+  //               <input
+  //                 type="number"
+  //                 value={floorCustomArea}
+  //                 onChange={(e) => selectCustomArea(e.target.value)}
+  //                 placeholder={`<= ${round2(floorAvailable)} sqft`}
+  //                 className={`w-full px-3 py-2 border rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+  //                   floorSelectMode === "CUSTOM_AREA" && selectionInvalid
+  //                     ? "border-red-300"
+  //                     : "border-gray-300"
+  //                 }`}
+  //               />
+  //               <div className="mt-2 text-[11px] text-gray-600">
+  //                 Available: <span className="font-medium">{round2(floorAvailable)}</span> sqft
+  //               </div>
+  //             </div>
+  //           </div>
+
+  //           <div className="divide-y divide-gray-200">
+  //             {(selectedTower?.floors || []).map((f) => {
+  //               const isActive = String(f.floor_id) === String(selectedFloorId);
+  //               const av = round2(toFloat(f.floor_available_area_sqft, 0));
+  //               const tt = round2(toFloat(f.floor_total_area_sqft, 0));
+
+  //               return (
+  //                 <button
+  //                   key={f.floor_id}
+  //                   type="button"
+  //                   onClick={() => {
+  //                     setSelectedFloorId(f.floor_id);
+  //                     setUnitSelections({});
+  //                     setFloorSelectMode("MANUAL");
+  //                     setFloorCustomArea("");
+  //                     setUnitQuery("");
+  //                     setUnitFilter("ALL");
+  //                   }}
+  //                   className={`w-full text-left px-4 py-3 hover:bg-gray-50 ${
+  //                     isActive ? "bg-blue-50" : ""
+  //                   }`}
+  //                 >
+  //                   <div className="flex items-center justify-between gap-2">
+  //                     <div className="font-medium text-gray-900 truncate">
+  //                       {f.floor_name || `Floor ${f.floor_number ?? f.floor_id}`}
+  //                     </div>
+  //                     <span
+  //                       className={`text-[11px] px-2 py-0.5 rounded-full border ${
+  //                         av > 0
+  //                           ? "bg-green-50 border-green-200 text-green-700"
+  //                           : "bg-red-50 border-red-200 text-red-700"
+  //                       }`}
+  //                     >
+  //                       {av} avail
+  //                     </span>
+  //                   </div>
+  //                   <div className="mt-0.5 text-xs text-gray-500">
+  //                     Total: {tt} sqft
+  //                   </div>
+  //                 </button>
+  //               );
+  //             })}
+  //           </div>
+  //         </div>
+
+  //         {/* ================= RIGHT: Units ================= */}
+  //         <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
+  //           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
+  //             <div className="flex items-center justify-between gap-2">
+  //               <div className="text-xs font-semibold text-gray-700">Units</div>
+
+  //               <div className="flex items-center gap-2">
+  //                 <button
+  //                   type="button"
+  //                   onClick={() => setUnitFilter("ALL")}
+  //                   className={`text-[11px] px-2 py-1 rounded-md border ${
+  //                     unitFilter === "ALL"
+  //                       ? "border-blue-600 bg-blue-50 text-blue-700"
+  //                       : "border-gray-200 bg-white hover:bg-gray-50"
+  //                   }`}
+  //                 >
+  //                   All
+  //                 </button>
+  //                 <button
+  //                   type="button"
+  //                   onClick={() => setUnitFilter("AVAILABLE")}
+  //                   className={`text-[11px] px-2 py-1 rounded-md border ${
+  //                     unitFilter === "AVAILABLE"
+  //                       ? "border-blue-600 bg-blue-50 text-blue-700"
+  //                       : "border-gray-200 bg-white hover:bg-gray-50"
+  //                   }`}
+  //                 >
+  //                   Available
+  //                 </button>
+  //                 <button
+  //                   type="button"
+  //                   onClick={() => setUnitFilter("SELECTED")}
+  //                   className={`text-[11px] px-2 py-1 rounded-md border ${
+  //                     unitFilter === "SELECTED"
+  //                       ? "border-blue-600 bg-blue-50 text-blue-700"
+  //                       : "border-gray-200 bg-white hover:bg-gray-50"
+  //                   }`}
+  //                 >
+  //                   Selected
+  //                 </button>
+  //               </div>
+  //             </div>
+
+  //             <div className="mt-3">
+  //               <input
+  //                 value={unitQuery}
+  //                 onChange={(e) => setUnitQuery(e.target.value)}
+  //                 placeholder="Search unit (name/type/id)..."
+  //                 className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+  //               />
+  //             </div>
+  //           </div>
+
+  //           <div className="divide-y divide-gray-200">
+  //             {(filteredFloorUnits || []).length ? (
+  //               filteredFloorUnits.map((u) => {
+  //                 const unitId = String(u.unit_id);
+  //                 const avail = toFloat(u.available_area_sqft, 0);
+  //                 const selected = !!unitSelections?.[unitId];
+
+  //                 const isResidential =
+  //                   String(u.unit_type || "").toUpperCase() === "RESIDENTIAL";
+  //                 const divisible = !!u.is_divisible && !isResidential;
+  //                 const disabled = avail <= 0;
+
+  //                 const sel = unitSelections?.[unitId] || null;
+  //                 const segs = Array.isArray(sel?.segments) ? sel.segments : [];
+  //                 const segSum = round2(
+  //                   segs.reduce((s, x) => s + toFloat(x.allocated_area_sqft, 0), 0)
+  //                 );
+
+  //                 return (
+  //                   <div key={unitId} className={`px-4 py-3 ${disabled ? "opacity-60" : ""}`}>
+  //                     <div className="flex items-start justify-between gap-3">
+  //                       <button
+  //                         type="button"
+  //                         disabled={disabled}
+  //                         onClick={() => toggleUnit(u)}
+  //                         className={`text-left flex-1 ${disabled ? "cursor-not-allowed" : ""}`}
+  //                       >
+  //                         <div className="flex items-center gap-2">
+  //                           <div
+  //                             className={`w-4 h-4 rounded border ${
+  //                               selected
+  //                                 ? "bg-blue-600 border-blue-600"
+  //                                 : "bg-white border-gray-300"
+  //                             }`}
+  //                           />
+  //                           <div className="font-medium text-gray-900 truncate">
+  //                             {u.unit_name || `Unit ${u.unit_id}`}
+  //                           </div>
+
+  //                           <span className="text-[11px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-600">
+  //                             {u.unit_type || "—"}
+  //                           </span>
+
+  //                           {divisible ? (
+  //                             <span className="text-[11px] px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200 text-indigo-700">
+  //                               Divisible
+  //                             </span>
+  //                           ) : null}
+  //                         </div>
+
+  //                         <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
+  //                           <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200 text-gray-700">
+  //                             Total: {round2(toFloat(u.total_area_sqft, 0))}
+  //                           </span>
+  //                           <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200 text-gray-700">
+  //                             Reserved: {round2(toFloat(u.reserved_area_sqft, 0))}
+  //                           </span>
+  //                           <span
+  //                             className={`px-2 py-0.5 rounded border ${
+  //                               avail > 0
+  //                                 ? "bg-green-50 border-green-200 text-green-700"
+  //                                 : "bg-red-50 border-red-200 text-red-700"
+  //                             }`}
+  //                           >
+  //                             Available: {round2(avail)}
+  //                           </span>
+  //                         </div>
+  //                       </button>
+
+  //                       {/* mode selector */}
+  //                       {selected && divisible ? (
+  //                         <select
+  //                           value={sel?.allocation_mode || "PARTIAL"}
+  //                           onChange={(e) => setUnitMode(u, e.target.value)}
+  //                           className="shrink-0 px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-white"
+  //                         >
+  //                           <option value="FULL">FULL</option>
+  //                           <option value="PARTIAL">PARTIAL</option>
+  //                         </select>
+  //                       ) : selected ? (
+  //                         <div className="shrink-0 text-xs font-semibold text-gray-800">
+  //                           FULL
+  //                         </div>
+  //                       ) : null}
+  //                     </div>
+
+  //                     {/* details */}
+  //                     {selected ? (
+  //                       <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+  //                         {!divisible || sel?.allocation_mode === "FULL" ? (
+  //                           <div className="text-xs text-gray-700">
+  //                             Selected Area: <b>{round2(avail)}</b> sqft (FULL)
+  //                           </div>
+  //                         ) : (
+  //                           <div className="space-y-2">
+  //                             <div className="flex items-center justify-between text-xs text-gray-700">
+  //                               <span>Segments total</span>
+  //                               <span className="font-semibold">
+  //                                 {segSum} / {round2(avail)} sqft
+  //                               </span>
+  //                             </div>
+
+  //                             {segs.map((s, i) => (
+  //                               <div key={i} className="flex items-center gap-2">
+  //                                 <input
+  //                                   type="number"
+  //                                   value={s.allocated_area_sqft ?? ""}
+  //                                   onChange={(e) => updateSegment(unitId, i, e.target.value)}
+  //                                   className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm bg-white"
+  //                                   placeholder={`>= ${u.min_divisible_area_sqft ?? 0}`}
+  //                                 />
+  //                                 <button
+  //                                   type="button"
+  //                                   onClick={() => removeSegment(unitId, i)}
+  //                                   className="px-2 py-2 text-xs border border-gray-200 rounded-md bg-white hover:bg-gray-50"
+  //                                 >
+  //                                   Remove
+  //                                 </button>
+  //                               </div>
+  //                             ))}
+
+  //                             <button
+  //                               type="button"
+  //                               onClick={() => addSegment(u)}
+  //                               className="px-3 py-2 text-xs border border-gray-200 rounded-md bg-white hover:bg-gray-50"
+  //                             >
+  //                               + Add segment
+  //                             </button>
+
+  //                             {selectionInvalid ? (
+  //                               <div className="text-[11px] text-red-700">
+  //                                 Your selection doesn’t match the target area (Percent/Custom). Adjust segments.
+  //                               </div>
+  //                             ) : null}
+  //                           </div>
+  //                         )}
+  //                       </div>
+  //                     ) : null}
+  //                   </div>
+  //                 );
+  //               })
+  //             ) : (
+  //               <div className="px-4 py-6 text-sm text-gray-500">
+  //                 No units found.
+  //               </div>
+  //             )}
+  //           </div>
+
+  //           <div className="px-4 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+  //             <button
+  //               type="button"
+  //               onClick={clearUnitSelections}
+  //               className="px-3 py-2 text-xs border border-gray-200 bg-white rounded-md hover:bg-gray-50"
+  //             >
+  //               Clear Selection
+  //             </button>
+
+  //             <div className="text-[11px] text-gray-600">
+  //               Selected:{" "}
+  //               <span className="font-semibold">
+  //                 {Object.keys(unitSelections || {}).length}
+  //               </span>
+  //             </div>
+  //           </div>
+  //         </div>
+  //       </div>
+  //     )}
+  //   </Card>
+  // );
 
 
       // case "property":
@@ -3414,6 +4518,41 @@ const selectCustomArea = (val) => {
             </Card>
           </div>
         );
+        {STEPS?.[stepIdx]?.key === "docs" ? (
+  <div className="sticky bottom-0 z-40 border-t border-gray-200 bg-white">
+    <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between gap-3">
+      <div className="text-xs text-gray-600">
+        {selectionInvalid ? (
+          <span className="text-red-700">
+            Allocation invalid: Remaining must be 0 for FULL / % / NEED.
+          </span>
+        ) : (
+          <span className="text-gray-600">
+            Final submission will create/activate lease using selected units + terms.
+          </span>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={handleFinalSubmit}
+        disabled={
+          saving ||
+          selectionInvalid ||
+          !formData.tenantId ||
+          !formData.siteId ||
+          !formData.leaseCommencementDate ||
+          !formData.leaseExpiryDate ||
+          !Object.keys(unitSelections || {}).length
+        }
+        className="px-5 py-2.5 rounded-lg text-sm font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+      >
+        {saving ? "Submitting..." : "Submit Lease"}
+      </button>
+    </div>
+  </div>
+) : null}
+
 
       default:
         return (
@@ -3563,14 +4702,14 @@ const selectCustomArea = (val) => {
             Cancel
           </button>
 
-          <button
+          {/* <button
             type="button"
             disabled={saving || creatingTenant}
             onClick={() => handleSave("DRAFT")}
             className="px-4 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50 disabled:opacity-60"
           >
             Save Draft
-          </button>
+          </button> */}
 
          <button
   type="button"
@@ -3657,6 +4796,200 @@ const selectCustomArea = (val) => {
           </div>
         </div>
       </Modal>
+      {/* Units modal (View units) */}
+<Modal
+  open={unitsModalOpen}
+  title={`Units — ${
+    selectedFloor?.floor_name || (selectedFloorId ? `Floor ${selectedFloorId}` : "")
+  }`}
+  onClose={() => setUnitsModalOpen(false)}
+  footer={
+    <div className="flex justify-end gap-2">
+      <button
+        type="button"
+        className="px-4 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
+        onClick={() => setUnitsModalOpen(false)}
+      >
+        Done
+      </button>
+    </div>
+  }
+>
+  <div className="space-y-3">
+    <div className="flex gap-2">
+      <input
+        value={unitQuery}
+        onChange={(e) => setUnitQuery(e.target.value)}
+        placeholder="Search unit (name/type/id)..."
+        className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm"
+      />
+      <select
+        value={unitFilter}
+        onChange={(e) => setUnitFilter(e.target.value)}
+        className="px-3 py-2 border border-gray-300 rounded-md text-sm bg-white"
+      >
+        <option value="ALL">All</option>
+        <option value="AVAILABLE">Available</option>
+        <option value="SELECTED">Selected</option>
+      </select>
+    </div>
+
+    <div className="border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-200">
+      {(filteredFloorUnits || []).length ? (
+        filteredFloorUnits.map((u) => {
+          const unitId = String(u.unit_id);
+          const avail = toFloat(u.available_area_sqft, 0);
+          const selected = !!unitSelections?.[unitId];
+          const disabled = avail <= 0;
+
+          const isResidential = String(u.unit_type || "").toUpperCase() === "RESIDENTIAL";
+          const divisible = !!u.is_divisible && !isResidential;
+
+          return (
+            <div key={unitId} className={`p-3 ${disabled ? "opacity-60" : ""}`}>
+              <div className="flex items-start justify-between gap-3">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => toggleUnit(u)}
+                  className={`flex-1 text-left ${disabled ? "cursor-not-allowed" : ""}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <div
+                      className={`w-4 h-4 rounded border ${
+                        selected ? "bg-blue-600 border-blue-600" : "bg-white border-gray-300"
+                      }`}
+                    />
+                    <div className="font-medium text-gray-900 truncate">
+                      {u.unit_name || `Unit ${u.unit_id}`}
+                    </div>
+                    <Pill tone="gray">{u.unit_type || "—"}</Pill>
+                    {divisible ? <Pill tone="indigo">Divisible</Pill> : null}
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-gray-600">
+                    <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200">
+                      Total: {round2(toFloat(u.total_area_sqft, 0))}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-gray-50 border border-gray-200">
+                      Reserved: {round2(toFloat(u.reserved_area_sqft, 0))}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-green-50 border border-green-200 text-green-700">
+                      Available: {round2(avail)}
+                    </span>
+                  </div>
+                </button>
+
+                {selected && divisible ? (
+                  <select
+                    value={unitSelections?.[unitId]?.allocation_mode || "PARTIAL"}
+                    onChange={(e) => setUnitMode(u, e.target.value)}
+                    className="px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-white"
+                  >
+                    <option value="FULL">FULL</option>
+                    <option value="PARTIAL">PARTIAL</option>
+                  </select>
+                ) : selected ? (
+                  <div className="text-xs font-semibold text-gray-800">FULL</div>
+                ) : null}
+              </div>
+
+              {selected && divisible && unitSelections?.[unitId]?.allocation_mode === "PARTIAL" ? (
+                <div className="mt-2 text-[11px] text-gray-500">
+                  Use “Edit split” from Selected Units to adjust segments.
+                </div>
+              ) : null}
+            </div>
+          );
+        })
+      ) : (
+        <div className="p-4 text-sm text-gray-500">No units found.</div>
+      )}
+    </div>
+  </div>
+</Modal>
+
+{/* Edit split modal */}
+<Modal
+  open={!!editSplitUnitId}
+  title="Edit split (segments)"
+  onClose={() => setEditSplitUnitId(null)}
+  footer={
+    <div className="flex justify-end gap-2">
+      <button
+        type="button"
+        className="px-4 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50"
+        onClick={() => setEditSplitUnitId(null)}
+      >
+        Done
+      </button>
+    </div>
+  }
+>
+  {(() => {
+    const u = availabilityIndex.unitsById[String(editSplitUnitId)];
+    if (!u) return <div className="text-sm text-gray-600">Unit not found.</div>;
+
+    const unitId = String(u.unit_id);
+    const avail = round2(toFloat(u.available_area_sqft, 0));
+    const sel = unitSelections?.[unitId] || { allocation_mode: "PARTIAL", segments: [] };
+    const segs = Array.isArray(sel.segments) ? sel.segments : [];
+
+    const segSum = round2(segs.reduce((s, x) => s + toFloat(x.allocated_area_sqft, 0), 0));
+
+    return (
+      <div className="space-y-3">
+        <div className="text-sm text-gray-800">
+          <div className="font-semibold">{u.unit_name || `Unit ${u.unit_id}`}</div>
+          <div className="text-xs text-gray-500 mt-1">
+            Available: <b>{avail}</b> sqft • Min divisible: <b>{toFloat(u.min_divisible_area_sqft, 0)}</b> sqft
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 flex items-center justify-between text-xs">
+          <span className="text-gray-600">Segments total</span>
+          <span className="font-semibold text-gray-900">
+            {segSum} / {avail} sqft
+          </span>
+        </div>
+
+        <div className="space-y-2">
+          {segs.map((s, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                type="number"
+                value={s.allocated_area_sqft ?? ""}
+                onChange={(e) => updateSegment(unitId, i, e.target.value)}
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-md text-sm bg-white"
+                placeholder="Allocated sqft"
+              />
+              <button
+                type="button"
+                onClick={() => removeSegment(unitId, i)}
+                className="px-3 py-2 text-xs border border-gray-200 rounded-md bg-white hover:bg-gray-50"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => addSegment(u)}
+          className="px-3 py-2 text-xs border border-gray-200 rounded-md bg-white hover:bg-gray-50"
+        >
+          + Add segment
+        </button>
+
+        <div className="text-[11px] text-gray-500">
+          Note: Allocation Builder targets require exact match (Remaining = 0) to enable Submit.
+        </div>
+      </div>
+    );
+  })()}
+</Modal>
+
     </div>
   );
 };
